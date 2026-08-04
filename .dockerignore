@@ -1,0 +1,9 @@
+.git
+.gocache
+.gomodcache
+bin
+dist
+coverage.out
+/volcano
+/worktrees
+*.log

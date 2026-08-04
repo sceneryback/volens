@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Volens · Volcano Debug Agent</title>
+    <link rel="stylesheet" href="/style.css">
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <small>VOLCANO SCHEDULER</small>
+          <h1>Volens Debug Agent</h1>
+          <p>沿调度链定位 Pending Pod：合法性 → 入队 → 节点过滤 → 源码分析</p>
+        </div>
+
+        <button id="reload" type="button">刷新列表</button>
+      </header>
+
+      <section class="picker" aria-label="分析目标">
+        <div class="field">
+          <label for="pod">故障 Pod</label>
+          <select id="pod" disabled>
+            <option>正在读取 Pending Pod…</option>
+          </select>
+          <span id="pod-status" class="field-status" data-state="loading">正在加载</span>
+        </div>
+
+        <div class="field">
+          <label for="branch">Volcano 分支</label>
+          <select id="branch" disabled>
+            <option>正在读取远程分支…</option>
+          </select>
+          <span id="branch-status" class="field-status" data-state="loading">正在加载</span>
+        </div>
+
+        <button id="analyze" type="button" disabled>开始分析</button>
+      </section>
+
+      <div id="status" class="global-status" role="status" aria-live="polite"></div>
+      <section id="summary" hidden></section>
+      <section id="checks"></section>
+      <section id="nodes"></section>
+      <section id="llm"></section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
