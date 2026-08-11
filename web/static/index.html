@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Volens · Volcano Debug Agent</title>
+    <link rel="stylesheet" href="/style.css">
+  </head>
+  <body>
+    <main>
+      <header class="topbar">
+        <div class="brand">
+          <svg class="logo" viewBox="0 0 64 64" role="img" aria-label="Volens logo">
+            <g class="logo-tiles">
+              <rect x="26" y="8" width="8" height="8" rx="2"></rect>
+              <rect x="20" y="16" width="8" height="8" rx="2"></rect>
+              <rect x="32" y="16" width="8" height="8" rx="2"></rect>
+              <rect x="14" y="24" width="8" height="8" rx="2"></rect>
+              <rect x="26" y="24" width="8" height="8" rx="2"></rect>
+              <rect x="38" y="24" width="8" height="8" rx="2"></rect>
+              <rect x="8" y="32" width="8" height="8" rx="2"></rect>
+              <rect x="20" y="32" width="8" height="8" rx="2"></rect>
+              <rect x="32" y="32" width="8" height="8" rx="2"></rect>
+              <rect x="44" y="32" width="8" height="8" rx="2"></rect>
+              <rect x="2" y="42" width="8" height="8" rx="2"></rect>
+              <rect x="14" y="42" width="8" height="8" rx="2"></rect>
+              <rect x="26" y="42" width="8" height="8" rx="2"></rect>
+              <rect x="38" y="42" width="8" height="8" rx="2"></rect>
+              <rect x="50" y="42" width="8" height="8" rx="2"></rect>
+            </g>
+            <circle cx="49" cy="49" r="8" fill="#202326" stroke="#edf0f2" stroke-width="3"></circle>
+            <path d="m55 55 6 6" stroke="#edf0f2" stroke-width="3" stroke-linecap="round"></path>
+          </svg>
+
+          <div>
+            <small data-i18n="brandKicker">VOLCANO SCHEDULER DIAGNOSTICS</small>
+            <h1>Volens</h1>
+            <p data-i18n="brandSubtitle">Diagnose Pending pods in scheduler order: enqueue → JobValid → allocate</p>
+          </div>
+        </div>
+
+        <div class="top-actions">
+          <button id="language" class="ghost-button language-toggle" type="button">中文</button>
+          <button id="reload" class="ghost-button" type="button" data-i18n="reload">Refresh targets</button>
+        </div>
+      </header>
+
+      <section class="picker panel" aria-label="Analysis target">
+        <div class="field">
+          <label for="pod" data-i18n="podLabel">Pending Pod</label>
+          <select id="pod" disabled>
+            <option>Loading Pending pods…</option>
+          </select>
+          <span id="pod-status" class="field-status" data-state="loading">Loading</span>
+        </div>
+
+        <div class="field">
+          <label for="branch" data-i18n="branchLabel">Volcano branch</label>
+          <select id="branch" disabled>
+            <option>Loading remote branches…</option>
+          </select>
+          <span id="branch-status" class="field-status" data-state="loading">Loading</span>
+        </div>
+
+        <button id="analyze" type="button" disabled data-i18n="analyze">Analyze</button>
+      </section>
+
+      <div id="status" class="global-status" role="status" aria-live="polite"></div>
+      <section id="progress" hidden></section>
+      <section id="summary" hidden></section>
+      <section id="enqueue"></section>
+      <section id="job-valid"></section>
+      <section id="allocate"></section>
+      <section id="details"></section>
+      <section id="llm"></section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

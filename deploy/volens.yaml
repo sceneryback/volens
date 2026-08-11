@@ -1,0 +1,86 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: volens
+  namespace: volcano-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: volens
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "events", "nodes", "configmaps", "persistentvolumeclaims", "persistentvolumes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get"]
+  - apiGroups: ["scheduling.k8s.io"]
+    resources: ["priorityclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["scheduling.volcano.sh"]
+    resources: ["podgroups", "queues"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: volens
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: volens
+subjects:
+  - kind: ServiceAccount
+    name: volens
+    namespace: volcano-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: volens
+  namespace: volcano-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: volens}
+  template:
+    metadata:
+      labels: {app: volens}
+    spec:
+      serviceAccountName: volens
+      containers:
+        - name: volens
+          image: ghcr.io/your-org/volens:latest
+          ports:
+            - {name: http, containerPort: 8080}
+          env:
+            - {name: VOLCANO_REPO_URL, value: "https://github.com/volcano-sh/volcano.git"}
+            - {name: VOLCANO_GIT_UPDATE, value: "true"}
+            - {name: LLM_BASE_URL, value: "http://inference.default.svc:8000"}
+            - {name: LLM_MODEL, value: "your-model"}
+            - {name: LLM_MAX_TOOL_ROUNDS, value: "4"}
+            - {name: LLM_TIMEOUT, value: "10m"}
+            - {name: VOLENS_ANALYZE_TIMEOUT, value: "15m"}
+            - name: LLM_API_KEY
+              valueFrom:
+                secretKeyRef: {name: volens-llm, key: api-key, optional: true}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 1Gi}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: volens-deny-ingress
+  namespace: volcano-system
+spec:
+  podSelector:
+    matchLabels: {app: volens}
+  policyTypes: [Ingress]
+  ingress: []
