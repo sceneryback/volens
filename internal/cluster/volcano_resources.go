@@ -8,10 +8,12 @@ import (
 	"math"
 	"sort"
 	"strconv"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
@@ -45,19 +47,22 @@ type PodGroupCondition struct {
 }
 
 type PodGroup struct {
-	Namespace       string              `json:"namespace"`
-	Name            string              `json:"name"`
-	UID             string              `json:"uid"`
-	ResourceVersion string              `json:"resourceVersion,omitempty"`
-	Queue           string              `json:"queue"`
-	MinMember       int32               `json:"minMember"`
-	MinTaskMember   map[string]int32    `json:"minTaskMember,omitempty"`
-	MinResources    corev1.ResourceList `json:"minResources,omitempty"`
-	Phase           string              `json:"phase"`
-	Conditions      []PodGroupCondition `json:"conditions,omitempty"`
-	Running         int32               `json:"running,omitempty"`
-	Succeeded       int32               `json:"succeeded,omitempty"`
-	Failed          int32               `json:"failed,omitempty"`
+	Namespace         string              `json:"namespace"`
+	Name              string              `json:"name"`
+	UID               string              `json:"uid"`
+	ResourceVersion   string              `json:"resourceVersion,omitempty"`
+	CreationTimestamp time.Time           `json:"creationTimestamp"`
+	Queue             string              `json:"queue"`
+	PriorityClassName string              `json:"priorityClassName,omitempty"`
+	Priority          *int32              `json:"priority,omitempty"`
+	MinMember         int32               `json:"minMember"`
+	MinTaskMember     map[string]int32    `json:"minTaskMember,omitempty"`
+	MinResources      corev1.ResourceList `json:"minResources,omitempty"`
+	Phase             string              `json:"phase"`
+	Conditions        []PodGroupCondition `json:"conditions,omitempty"`
+	Running           int32               `json:"running,omitempty"`
+	Succeeded         int32               `json:"succeeded,omitempty"`
+	Failed            int32               `json:"failed,omitempty"`
 }
 
 type Queue struct {
@@ -69,6 +74,7 @@ type Queue struct {
 	Parent          string              `json:"parent,omitempty"`
 	Weight          int32               `json:"weight,omitempty"`
 	Reclaimable     bool                `json:"reclaimable,omitempty"`
+	Guarantee       corev1.ResourceList `json:"guarantee,omitempty"`
 	Capability      corev1.ResourceList `json:"capability,omitempty"`
 	Deserved        corev1.ResourceList `json:"deserved,omitempty"`
 	Allocated       corev1.ResourceList `json:"allocated,omitempty"`
@@ -103,6 +109,8 @@ func (m *Client) GetPodGroup(ctx context.Context, namespace, name string) (PodGr
 		return PodGroup{}, fmt.Errorf("decode PodGroup %s/%s from informer cache: %w", namespace, name, err)
 	}
 
+	m.resolvePodGroupPriority(&result)
+
 	return result, nil
 }
 
@@ -129,6 +137,105 @@ func (m *Client) GetQueue(ctx context.Context, name string) (Queue, error) {
 	if err != nil {
 		return Queue{}, fmt.Errorf("decode Queue %s from informer cache: %w", name, err)
 	}
+
+	return result, nil
+}
+
+func (m *Client) ListQueues(ctx context.Context) ([]Queue, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	if m.queueLister == nil {
+		return nil, fmt.Errorf("list Queues: %w", ErrVolcanoResourceCacheUnavailable)
+	}
+
+	objects, err := m.queueLister.List(labels.Everything())
+	if err != nil {
+		return nil, fmt.Errorf("list Queues from informer cache: %w", err)
+	}
+
+	result := make([]Queue, 0, len(objects))
+	for _, object := range objects {
+		queueObject, ok := object.(*unstructured.Unstructured)
+		if !ok {
+			continue
+		}
+
+		queue, err := queueFromUnstructured(queueObject)
+		if err != nil {
+			return nil, fmt.Errorf("decode Queue %s from informer cache: %w", queueObject.GetName(), err)
+		}
+
+		result = append(result, queue)
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Name < result[j].Name
+	})
+
+	return result, nil
+}
+
+func (m *Client) ListPodGroupsForQueue(
+	ctx context.Context,
+	queueName string,
+	defaultQueueName string,
+) ([]PodGroup, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	if m.podGroupIndexer == nil {
+		return nil, fmt.Errorf(
+			"list PodGroups for Queue %s: %w",
+			queueName,
+			ErrVolcanoResourceCacheUnavailable,
+		)
+	}
+
+	indexValues := []string{queueName}
+	if queueName != "" && queueName == defaultQueueName {
+		indexValues = append(indexValues, podGroupUnspecifiedQueue)
+	}
+
+	result := make([]PodGroup, 0)
+
+	for _, indexValue := range indexValues {
+		objects, err := m.podGroupIndexer.ByIndex(podGroupQueueIndex, indexValue)
+		if err != nil {
+			return result, fmt.Errorf(
+				"list PodGroups for Queue %s from informer cache: %w",
+				queueName,
+				err,
+			)
+		}
+
+		for _, object := range objects {
+			podGroup, ok := object.(*unstructured.Unstructured)
+			if !ok {
+				continue
+			}
+
+			decoded, err := podGroupFromUnstructured(podGroup)
+			if err != nil {
+				return result, fmt.Errorf(
+					"decode PodGroup %s/%s from informer cache: %w",
+					podGroup.GetNamespace(),
+					podGroup.GetName(),
+					err,
+				)
+			}
+
+			m.resolvePodGroupPriority(&decoded)
+
+			result = append(result, decoded)
+		}
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Namespace+"/"+result[i].Name < result[j].Namespace+"/"+result[j].Name
+	})
 
 	return result, nil
 }
@@ -184,6 +291,57 @@ func podGroupIndexKeys(object any) ([]string, error) {
 	return []string{pod.Namespace + "/" + name}, nil
 }
 
+func podGroupQueueIndexKeys(object any) ([]string, error) {
+	podGroup, ok := object.(*unstructured.Unstructured)
+	if !ok {
+		return nil, fmt.Errorf("PodGroup queue index received %T", object)
+	}
+
+	queueName, err := stringAt(podGroup.Object, "spec", "queue")
+	if err != nil {
+		return nil, err
+	}
+
+	if queueName == "" {
+		return []string{podGroupUnspecifiedQueue}, nil
+	}
+
+	return []string{queueName}, nil
+}
+
+func (m *Client) resolvePodGroupPriority(podGroup *PodGroup) {
+	if podGroup == nil || podGroup.Priority != nil || m.priorityLister == nil {
+		return
+	}
+
+	if podGroup.PriorityClassName != "" {
+		priorityClass, err := m.priorityLister.Get(podGroup.PriorityClassName)
+		if err != nil {
+			return
+		}
+
+		priority := priorityClass.Value
+		podGroup.Priority = &priority
+
+		return
+	}
+
+	priority := int32(0)
+	priorityClasses, err := m.priorityLister.List(labels.Everything())
+	if err != nil {
+		return
+	}
+
+	for _, priorityClass := range priorityClasses {
+		if priorityClass.GlobalDefault {
+			priority = priorityClass.Value
+			break
+		}
+	}
+
+	podGroup.Priority = &priority
+}
+
 func podGroupFromUnstructured(object *unstructured.Unstructured) (PodGroup, error) {
 	if object == nil {
 		return PodGroup{}, fmt.Errorf("object is nil")
@@ -205,6 +363,16 @@ func podGroupFromUnstructured(object *unstructured.Unstructured) (PodGroup, erro
 	}
 
 	queue, err := stringAt(object.Object, "spec", "queue")
+	if err != nil {
+		return PodGroup{}, err
+	}
+
+	priorityClassName, err := stringAt(object.Object, "spec", "priorityClassName")
+	if err != nil {
+		return PodGroup{}, err
+	}
+
+	priority, err := optionalInt32At(object.Object, "spec", "priority")
 	if err != nil {
 		return PodGroup{}, err
 	}
@@ -235,19 +403,22 @@ func podGroupFromUnstructured(object *unstructured.Unstructured) (PodGroup, erro
 	}
 
 	return PodGroup{
-		Namespace:       object.GetNamespace(),
-		Name:            object.GetName(),
-		UID:             string(object.GetUID()),
-		ResourceVersion: object.GetResourceVersion(),
-		Queue:           queue,
-		MinMember:       minMember,
-		MinTaskMember:   minTaskMember,
-		MinResources:    minResources,
-		Phase:           phase,
-		Conditions:      conditions,
-		Running:         running,
-		Succeeded:       succeeded,
-		Failed:          failed,
+		Namespace:         object.GetNamespace(),
+		Name:              object.GetName(),
+		UID:               string(object.GetUID()),
+		ResourceVersion:   object.GetResourceVersion(),
+		CreationTimestamp: object.GetCreationTimestamp().Time,
+		Queue:             queue,
+		PriorityClassName: priorityClassName,
+		Priority:          priority,
+		MinMember:         minMember,
+		MinTaskMember:     minTaskMember,
+		MinResources:      minResources,
+		Phase:             phase,
+		Conditions:        conditions,
+		Running:           running,
+		Succeeded:         succeeded,
+		Failed:            failed,
 	}, nil
 }
 
@@ -277,6 +448,11 @@ func queueFromUnstructured(object *unstructured.Unstructured) (Queue, error) {
 	}
 
 	reclaimable, err := boolAt(object.Object, "spec", "reclaimable")
+	if err != nil {
+		return Queue{}, err
+	}
+
+	guarantee, err := resourceListAt(object.Object, "spec", "guarantee", "resource")
 	if err != nil {
 		return Queue{}, err
 	}
@@ -330,6 +506,7 @@ func queueFromUnstructured(object *unstructured.Unstructured) (Queue, error) {
 		Parent:          parent,
 		Weight:          weight,
 		Reclaimable:     reclaimable,
+		Guarantee:       guarantee,
 		Capability:      capability,
 		Deserved:        deserved,
 		Allocated:       allocated,
@@ -393,6 +570,24 @@ func int32At(object map[string]any, fields ...string) (int32, error) {
 	}
 
 	return result, nil
+}
+
+func optionalInt32At(object map[string]any, fields ...string) (*int32, error) {
+	value, found, err := unstructured.NestedFieldNoCopy(object, fields...)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", fieldPath(fields), err)
+	}
+
+	if !found {
+		return nil, nil
+	}
+
+	result, err := valueAsInt32(value)
+	if err != nil {
+		return nil, fmt.Errorf("parse %s: %w", fieldPath(fields), err)
+	}
+
+	return &result, nil
 }
 
 func int32MapAt(object map[string]any, fields ...string) (map[string]int32, error) {

@@ -10,13 +10,16 @@ metadata:
   name: volens
 rules:
   - apiGroups: [""]
-    resources: ["pods", "pods/log", "events", "nodes", "persistentvolumeclaims", "persistentvolumes"]
+    resources: ["pods", "pods/log", "events", "nodes", "configmaps", "persistentvolumeclaims", "persistentvolumes"]
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["pods/exec"]
     verbs: ["create"]
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
+    verbs: ["get"]
+  - apiGroups: ["scheduling.k8s.io"]
+    resources: ["priorityclasses"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["scheduling.volcano.sh"]
     resources: ["podgroups", "queues"]
@@ -61,6 +64,7 @@ spec:
             - {name: LLM_MODEL, value: "your-model"}
             - {name: LLM_MAX_TOOL_ROUNDS, value: "4"}
             - {name: LLM_TIMEOUT, value: "10m"}
+            - {name: VOLENS_ANALYZE_TIMEOUT, value: "15m"}
             - name: LLM_API_KEY
               valueFrom:
                 secretKeyRef: {name: volens-llm, key: api-key, optional: true}
@@ -70,12 +74,13 @@ spec:
             requests: {cpu: 100m, memory: 128Mi}
             limits: {cpu: "1", memory: 1Gi}
 ---
-apiVersion: v1
-kind: Service
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
 metadata:
-  name: volens
+  name: volens-deny-ingress
   namespace: volcano-system
 spec:
-  selector: {app: volens}
-  ports:
-    - {name: http, port: 8080, targetPort: http}
+  podSelector:
+    matchLabels: {app: volens}
+  policyTypes: [Ingress]
+  ingress: []

@@ -23,6 +23,7 @@ RUN set -eu; \
 FROM golang:1.22-alpine AS build
 WORKDIR /src
 COPY . .
+RUN go env -w GOPROXY=https://goproxy.cn,direct
 RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/volens ./cmd/volens
 
 FROM alpine:3.20

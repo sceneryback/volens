@@ -15,15 +15,7 @@ func TestLoadSchedulerSourcesDiscoversFixedFilesAndRegisteredHooks(t *testing.T)
 
 func Execute() {}
 `,
-		"pkg/scheduler/actions/allocate/v2/allocate.go": `package allocate
-
-func Execute() {}
-`,
 		"pkg/scheduler/actions/enqueue/enqueue.go": `package enqueue
-
-func Execute() {}
-`,
-		"pkg/scheduler/actions/enqueue/v2/enqueue.go": `package enqueue
 
 func Execute() {}
 `,
@@ -55,6 +47,12 @@ func register(session Session) {
 // session.AddJobValidFn("comment", validate)
 const example = "AddPredicateFn"
 `,
+		"pkg/scheduler/plugins/future/register.go": `package future
+
+func register(session Session) {
+	session.AddFuturePlacementFn("future", place)
+}
+`,
 		"pkg/scheduler/plugins/ignored/ignored.go": `package ignored
 
 func register(session Session) {
@@ -80,13 +78,13 @@ func register(session Session) {
 
 	wantPaths := []string{
 		"pkg/scheduler/actions/allocate/allocate.go",
-		"pkg/scheduler/actions/allocate/v2/allocate.go",
 		"pkg/scheduler/actions/enqueue/enqueue.go",
-		"pkg/scheduler/actions/enqueue/v2/enqueue.go",
 		"pkg/scheduler/framework/session_plugins.go",
 		"pkg/scheduler/plugins/alpha/helper/helper.go",
 		"pkg/scheduler/plugins/alpha/register.go",
 		"pkg/scheduler/plugins/beta/register.go",
+		"pkg/scheduler/plugins/future/register.go",
+		"pkg/scheduler/plugins/ignored/ignored.go",
 	}
 	gotPaths := make([]string, 0, len(sources))
 
@@ -98,26 +96,217 @@ func register(session Session) {
 		t.Fatalf("source paths = %v, want %v", gotPaths, wantPaths)
 	}
 
-	for _, source := range sources[:6] {
-		if len(source.Hooks) != 0 {
-			t.Fatalf("non-registration file %s hooks = %v, want empty", source.Path, source.Hooks)
+	for _, source := range sources {
+		if strings.HasPrefix(source.Path, "pkg/scheduler/actions/") ||
+			source.Path == "pkg/scheduler/framework/session_plugins.go" {
+			if len(source.Hooks) != 0 {
+				t.Fatalf("non-registration file %s hooks = %v, want empty", source.Path, source.Hooks)
+			}
 		}
 	}
 
-	wantAlphaHooks := []string{"AddJobEnqueueableFn", "AddPrePredicateFn"}
-	if !reflect.DeepEqual(sources[6].Hooks, wantAlphaHooks) {
-		t.Fatalf("alpha hooks = %v, want %v", sources[6].Hooks, wantAlphaHooks)
+	hooksByPath := map[string][]string{}
+
+	for _, indexed := range sources {
+		hooksByPath[indexed.Path] = indexed.Hooks
 	}
 
-	wantBetaHooks := []string{"AddJobValidFn", "AddPredicateFn"}
-	if !reflect.DeepEqual(sources[7].Hooks, wantBetaHooks) {
-		t.Fatalf("beta hooks = %v, want %v", sources[7].Hooks, wantBetaHooks)
+	wantHooksByPath := map[string][]string{
+		"pkg/scheduler/plugins/alpha/register.go":  {"AddJobEnqueueableFn", "AddPrePredicateFn"},
+		"pkg/scheduler/plugins/beta/register.go":   {"AddJobValidFn", "AddPredicateFn"},
+		"pkg/scheduler/plugins/future/register.go": {"AddFuturePlacementFn"},
+		"pkg/scheduler/plugins/ignored/ignored.go": {"AddNodeOrderFn"},
+	}
+
+	for path, wantHooks := range wantHooksByPath {
+		if !reflect.DeepEqual(hooksByPath[path], wantHooks) {
+			t.Fatalf("%s hooks = %v, want %v", path, hooksByPath[path], wantHooks)
+		}
 	}
 
 	for _, source := range sources {
 		if source.Content == "" {
 			t.Errorf("source %s content is empty with an ample budget", source.Path)
 		}
+	}
+}
+
+func TestLoadSchedulerSourcesPropagatesPluginNameAcrossPluginUnit(t *testing.T) {
+	worktree := t.TempDir()
+	files := map[string]string{
+		"pkg/scheduler/plugins/quota/name.go": `package quota
+
+const PluginName = "quota"
+`,
+		"pkg/scheduler/plugins/quota/enqueue.go": `package quota
+
+func registerEnqueue(session Session) {
+	session.AddJobEnqueueableFn(PluginName, enqueue)
+}
+`,
+		"pkg/scheduler/plugins/quota/predicate.go": `package quota
+
+func registerPredicate(session Session) {
+	session.AddPredicateFn(PluginName, predicate)
+}
+`,
+		"pkg/scheduler/plugins/unregistered/name.go": `package unregistered
+
+const PluginName = "unregistered"
+`,
+	}
+
+	for path, content := range files {
+		writeSchedulerSource(t, worktree, path, content)
+	}
+
+	sources, err := LoadSchedulerSources(worktree, 4_096, 32_768)
+	if err != nil {
+		t.Fatalf("LoadSchedulerSources() error = %v", err)
+	}
+
+	wantHooks := map[string][]string{
+		"pkg/scheduler/plugins/quota/enqueue.go":   {"AddJobEnqueueableFn"},
+		"pkg/scheduler/plugins/quota/name.go":      nil,
+		"pkg/scheduler/plugins/quota/predicate.go": {"AddPredicateFn"},
+	}
+	if len(sources) != len(wantHooks) {
+		t.Fatalf("source count = %d, want %d: %#v", len(sources), len(wantHooks), sources)
+	}
+
+	for _, source := range sources {
+		hooks, found := wantHooks[source.Path]
+		if !found {
+			t.Errorf("unexpected source %q", source.Path)
+
+			continue
+		}
+
+		if !reflect.DeepEqual(source.Hooks, hooks) {
+			t.Errorf("source %s hooks = %v, want %v", source.Path, source.Hooks, hooks)
+		}
+
+		wantPluginNames := []string{"quota"}
+		if !reflect.DeepEqual(source.PluginNames, wantPluginNames) {
+			t.Errorf(
+				"source %s plugin names = %v, want %v",
+				source.Path,
+				source.PluginNames,
+				wantPluginNames,
+			)
+		}
+	}
+}
+
+func TestLoadSchedulerSourcesUsesNearestRegisteredAncestorForImplementations(t *testing.T) {
+	worktree := t.TempDir()
+	files := map[string]string{
+		"pkg/scheduler/plugins/ascend/type.go": `package ascend
+
+var PluginName = "volcano-npu"
+`,
+		"pkg/scheduler/plugins/ascend/register.go": `package ascend
+
+func register(session Session) {
+	session.AddJobValidFn(PluginName, validate)
+}
+`,
+		"pkg/scheduler/plugins/ascend/plugin/job.go": `package plugin
+
+func JobValid() {}
+`,
+		"pkg/scheduler/plugins/ascend/plugin/internal/helper.go": `package internal
+
+func ValidateTopology() {}
+`,
+		"pkg/scheduler/plugins/ascend/community/register.go": `package community
+
+const PluginName = "ascend-community"
+
+func register(session Session) {
+	session.AddPredicateFn(PluginName, predicate)
+}
+`,
+		"pkg/scheduler/plugins/ascend/community/internal/predicate.go": `package internal
+
+func Predicate() {}
+`,
+		"pkg/scheduler/plugins/unregistered/helper/helper.go": `package helper
+
+func Helper() {}
+`,
+	}
+
+	for path, content := range files {
+		writeSchedulerSource(t, worktree, path, content)
+	}
+
+	sources, err := LoadSchedulerSources(worktree, 4_096, 64_000)
+	if err != nil {
+		t.Fatalf("LoadSchedulerSources() error = %v", err)
+	}
+
+	namesByPath := map[string][]string{}
+
+	for _, indexed := range sources {
+		namesByPath[indexed.Path] = indexed.PluginNames
+	}
+
+	rootPaths := []string{
+		"pkg/scheduler/plugins/ascend/type.go",
+		"pkg/scheduler/plugins/ascend/register.go",
+		"pkg/scheduler/plugins/ascend/plugin/job.go",
+		"pkg/scheduler/plugins/ascend/plugin/internal/helper.go",
+	}
+
+	for _, path := range rootPaths {
+		if !reflect.DeepEqual(namesByPath[path], []string{"volcano-npu"}) {
+			t.Errorf("root-owned path %s names=%v", path, namesByPath[path])
+		}
+	}
+
+	communityPaths := []string{
+		"pkg/scheduler/plugins/ascend/community/register.go",
+		"pkg/scheduler/plugins/ascend/community/internal/predicate.go",
+	}
+
+	for _, path := range communityPaths {
+		if !reflect.DeepEqual(namesByPath[path], []string{"ascend-community"}) {
+			t.Errorf("nested-owned path %s names=%v", path, namesByPath[path])
+		}
+	}
+
+	if _, found := namesByPath["pkg/scheduler/plugins/unregistered/helper/helper.go"]; found {
+		t.Fatalf("unregistered plugin implementation was indexed: %v", namesByPath)
+	}
+}
+
+func TestLoadSchedulerSourcesDiscoversNonFixedActions(t *testing.T) {
+	worktree := t.TempDir()
+	writeSchedulerSource(
+		t,
+		worktree,
+		"pkg/scheduler/actions/custom-stage/custom.go",
+		"package customstage\n\nfunc Execute() {}\n",
+	)
+	writeSchedulerSource(
+		t,
+		worktree,
+		"pkg/scheduler/actions/custom-stage/custom_test.go",
+		"package customstage\n\nfunc TestOnly() {}\n",
+	)
+
+	sources, err := LoadSchedulerSources(worktree, 4_096, 32_768)
+	if err != nil {
+		t.Fatalf("LoadSchedulerSources() error = %v", err)
+	}
+
+	if len(sources) != 1 || sources[0].Path != "pkg/scheduler/actions/custom-stage/custom.go" {
+		t.Fatalf("dynamic action sources=%+v", sources)
+	}
+
+	if len(sources[0].Hooks) != 0 || len(sources[0].PluginNames) != 0 {
+		t.Fatalf("action metadata=%+v", sources[0])
 	}
 }
 

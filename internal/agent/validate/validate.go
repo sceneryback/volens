@@ -15,7 +15,6 @@ const taskSpecAnnotation = "volcano.sh/task-spec"
 
 var jobValidSources = []string{
 	"pkg/scheduler/actions/allocate/allocate.go:JobValid",
-	"pkg/scheduler/actions/allocate/v2/allocate.go:JobValid",
 	"pkg/scheduler/framework/session_plugins.go:JobValid",
 	"pkg/scheduler/framework/session.go:OpenSession",
 }
@@ -41,7 +40,7 @@ func Evaluate(
 	checks := []model.Check{
 		model.Known(
 			"task.pending",
-			"validate",
+			"preflight",
 			"Pod is Pending",
 			pod.Status.Phase == corev1.PodPending,
 			string(pod.Status.Phase),
@@ -50,7 +49,7 @@ func Evaluate(
 		evaluateSchedulerName(pod.Spec.SchedulerName, scheduler, schedulerErr),
 		model.Known(
 			"task.unbound",
-			"validate",
+			"preflight",
 			"Pod has not been assigned to a node",
 			pod.Spec.NodeName == "",
 			"spec.nodeName="+pod.Spec.NodeName+"; assigned Pending Pods require kubelet, runtime, image, or volume debugging instead of scheduler analysis",
@@ -58,7 +57,7 @@ func Evaluate(
 		),
 		model.Known(
 			"task.active",
-			"validate",
+			"preflight",
 			"Pod is not terminating",
 			pod.DeletionTimestamp == nil,
 			"deletionTimestamp must be empty",
@@ -66,7 +65,7 @@ func Evaluate(
 		),
 		model.Known(
 			"task.scheduling-gates",
-			"validate",
+			"preflight",
 			"Pod has no scheduling gates",
 			len(pod.Spec.SchedulingGates) == 0,
 			fmt.Sprintf("schedulingGates=%v", pod.Spec.SchedulingGates),
@@ -74,7 +73,7 @@ func Evaluate(
 		),
 		model.Known(
 			"task.containers",
-			"validate",
+			"preflight",
 			"Has containers",
 			len(pod.Spec.Containers) > 0,
 			"Pod must contain at least one container",
@@ -82,7 +81,7 @@ func Evaluate(
 		),
 		model.Known(
 			"job.podgroup",
-			"validate",
+			"preflight",
 			"PodGroup association",
 			podGroup != "",
 			podGroupReason,
@@ -101,7 +100,7 @@ func evaluateSchedulerName(
 	if errors.Is(schedulerErr, cluster.ErrVolcanoSchedulerNotReady) {
 		return model.Known(
 			"task.scheduler",
-			"validate",
+			"preflight",
 			"Ready Volcano scheduler instance exists",
 			false,
 			schedulerErr.Error(),
@@ -112,7 +111,7 @@ func evaluateSchedulerName(
 	if schedulerErr != nil {
 		return model.Unknown(
 			"task.scheduler",
-			"validate",
+			"preflight",
 			"Scheduler name is handled by this Volcano instance",
 			schedulerErr.Error(),
 			nil,
@@ -123,7 +122,7 @@ func evaluateSchedulerName(
 	if !scheduler.ConfigurationDeterminate {
 		return model.Unknown(
 			"task.scheduler",
-			"validate",
+			"preflight",
 			"Scheduler name is handled by this Volcano instance",
 			scheduler.ConfigurationReason,
 			scheduler.SchedulerNames,
@@ -143,7 +142,7 @@ func evaluateSchedulerName(
 
 	check := model.Known(
 		"task.scheduler",
-		"validate",
+		"preflight",
 		"Scheduler name is handled by this Volcano instance",
 		passed,
 		fmt.Sprintf("pod schedulerName=%q configured names=%v", podSchedulerName, scheduler.SchedulerNames),
@@ -167,7 +166,7 @@ func EvaluatePodGroup(
 		if apierrors.IsNotFound(podGroupErr) {
 			checks = append(checks, model.Known(
 				"job.podgroup.exists",
-				"validate",
+				"preflight",
 				"PodGroup exists",
 				false,
 				podGroupErr.Error(),
@@ -176,7 +175,7 @@ func EvaluatePodGroup(
 		} else {
 			checks = append(checks, model.Unknown(
 				"job.podgroup.exists",
-				"validate",
+				"preflight",
 				"PodGroup exists",
 				podGroupErr.Error(),
 				nil,
@@ -190,7 +189,7 @@ func EvaluatePodGroup(
 	exists := podGroup.Name == podGroupName && podGroup.Namespace != ""
 	podGroupCheck := model.Known(
 		"job.podgroup.exists",
-		"validate",
+		"preflight",
 		"PodGroup exists",
 		exists,
 		fmt.Sprintf("PodGroup=%s/%s phase=%s", podGroup.Namespace, podGroup.Name, podGroup.Phase),
@@ -218,7 +217,7 @@ func evaluateGangTasks(
 		return []model.Check{
 			model.Unknown(
 				"plugins.gang.tasks",
-				"validate",
+				"jobValid",
 				"Gang minimum task counts",
 				tasksErr.Error(),
 				nil,
@@ -250,7 +249,7 @@ func evaluateGangTasks(
 	minimumPassed := validTasks >= podGroup.MinMember
 	minimumCheck := model.Unknown(
 		"plugins.gang.min-member",
-		"validate",
+		"jobValid",
 		"Active gang minMember rule",
 		fmt.Sprintf(
 			"calculated valid tasks=%d minMember=%d wouldPass=%t; active gang plugin configuration is unavailable",
@@ -294,7 +293,7 @@ func evaluateGangTasks(
 
 		checks = append(checks, model.Unknown(
 			"plugins.gang.min-task-member."+taskName,
-			"validate",
+			"jobValid",
 			"Active gang minTaskMember "+taskName,
 			fmt.Sprintf(
 				"calculated valid tasks=%d minimum=%d wouldPass=%t; active gang plugin configuration is unavailable",
@@ -317,7 +316,7 @@ func evaluateGangTasks(
 func unknownPluginCheck() model.Check {
 	return model.Unknown(
 		"plugins.job-valid",
-		"validate",
+		"jobValid",
 		"Remaining active JobValid plugin hooks",
 		"branch-specific hooks depend on the scheduler Session and plugin-private state; the common gang rules were evaluated separately",
 		nil,

@@ -250,6 +250,18 @@ func TestManagerPrepareRetainsTagResolutionAndMasterFallback(t *testing.T) {
 	}
 }
 
+func TestRecommendBranchFromSchedulerVersion(t *testing.T) {
+	branches := []string{"master", "main", "release-1.9", "release-1.10"}
+
+	if branch := RecommendBranch("v1.9.0", branches); branch != "release-1.9" {
+		t.Fatalf("branch=%q", branch)
+	}
+
+	if branch := RecommendBranch("v1.11.0", branches); branch != "master" {
+		t.Fatalf("fallback branch=%q", branch)
+	}
+}
+
 func TestManagerPrepareUsesCommitSpecificWorktreeForMovingFallback(t *testing.T) {
 	t.Setenv("VOLCANO_GIT_UPDATE", "true")
 

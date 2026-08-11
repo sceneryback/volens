@@ -38,3 +38,22 @@ func Unknown(
 		Source:      source,
 	}
 }
+
+func Skipped(
+	id string,
+	stage string,
+	name string,
+	reason string,
+	source []string,
+) Check {
+	return Check{
+		ID:          id,
+		Stage:       stage,
+		Name:        name,
+		Passed:      true,
+		Determinate: true,
+		Skipped:     true,
+		Reason:      reason,
+		Source:      source,
+	}
+}

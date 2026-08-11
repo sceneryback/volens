@@ -63,6 +63,22 @@ func TestParseDumpResourcesKeepsPodCountAsWholeUnits(t *testing.T) {
 	assertNear(t, resources["nvidia.com/gpu"], 8)
 }
 
+func TestParseDumpResourcesCollapsesRequestAliases(t *testing.T) {
+	resources, err := parseDumpResources(
+		"pods 110.00, requests.pods 1000.00, nvidia.com/gpu 8000.00, requests.nvidia.com/gpu 4000.00",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(resources) != 2 {
+		t.Fatalf("resources=%+v", resources)
+	}
+
+	assertNear(t, resources["pods"], 1)
+	assertNear(t, resources["nvidia.com/gpu"], 4)
+}
+
 func TestCaptureCacheDumpFromStreamStartsScannerBeforeSignal(t *testing.T) {
 	reader, writer := io.Pipe()
 	stream := &observedReadCloser{
@@ -79,13 +95,14 @@ func TestCaptureCacheDumpFromStreamStartsScannerBeforeSignal(t *testing.T) {
 		cacheNodeLine("node-a", "500.00"),
 		cacheNodeLine("node-b", "2500.00"),
 		nodeDumpEnd,
+		cacheDumpEnd,
 	}, "\n") + "\n"
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
 	signalCalls := 0
-	nodes, err := captureCacheDumpFromStream(ctx, stream, func() error {
+	nodes, jobs, err := captureCacheDumpFromStream(ctx, stream, func() error {
 		signalCalls++
 
 		select {
@@ -112,6 +129,10 @@ func TestCaptureCacheDumpFromStreamStartsScannerBeforeSignal(t *testing.T) {
 		t.Fatalf("nodes=%v", nodes)
 	}
 
+	if len(jobs) != 0 {
+		t.Fatalf("jobs=%v", jobs)
+	}
+
 	assertNear(t, nodes["node-a"].Idle["cpu"], .5)
 	assertNear(t, nodes["node-b"].Idle["cpu"], 2.5)
 	assertNear(t, nodes["node-b"].Idle["nvidia.com/gpu"], 2)
@@ -127,6 +148,7 @@ func TestScanCacheDumpUsesLatestCompleteBoundaries(t *testing.T) {
 		cacheNodeLine("node-a", "500.00"),
 		cacheNodeLine("node-b", "2500.00"),
 		nodeDumpEnd,
+		cacheDumpEnd,
 		cacheNodeLine("after-end", "7000.00"),
 	}, "\n") + "\n"
 
@@ -155,6 +177,42 @@ func TestScanCacheDumpUsesLatestCompleteBoundaries(t *testing.T) {
 	assertNear(t, result.nodes["node-b"].Idle["cpu"], 2.5)
 }
 
+func TestScanCacheDumpParsesJobsAndTasks(t *testing.T) {
+	input := strings.Join([]string{
+		nodeDumpStart,
+		cacheNodeLine("node-a", "500.00"),
+		nodeDumpEnd,
+		cacheJobLine("job-uid", "default", "batch", "pg-a", 2),
+		cacheTaskLine("task-a", "default", "pod-a", "default/pg-a", "Running", "cpu 1000.00, memory 2048.00, pods 1.00, nvidia.com/gpu 4000.00"),
+		cacheTaskLine("task-b", "default", "pod-b", "default/pg-a", "Pending", "cpu 2000.00, memory 4096.00, pods 1.00, nvidia.com/gpu 1000.00"),
+		cacheDumpEnd,
+	}, "\n") + "\n"
+
+	result := scanCacheDump(strings.NewReader(input))
+	if result.err != nil {
+		t.Fatal(result.err)
+	}
+
+	job := result.jobs["default/pg-a"]
+	if job.UID != "job-uid" || job.Queue != "batch" || job.MinAvailable != 2 {
+		t.Fatalf("job=%+v", job)
+	}
+
+	if len(job.Tasks) != 2 {
+		t.Fatalf("tasks=%+v", job.Tasks)
+	}
+
+	if job.Tasks[0].Status != "Running" || job.Tasks[0].Resreq["cpu"] != 1 ||
+		job.Tasks[0].Resreq["nvidia.com/gpu"] != 4 {
+		t.Fatalf("task[0]=%+v", job.Tasks[0])
+	}
+
+	if job.Tasks[1].Status != "Pending" || job.Tasks[1].Resreq["cpu"] != 2 ||
+		job.Tasks[1].Resreq["nvidia.com/gpu"] != 1 {
+		t.Fatalf("task[1]=%+v", job.Tasks[1])
+	}
+}
+
 func TestScanCacheDumpReturnsPartialNodesWhenEndIsMissing(t *testing.T) {
 	input := strings.Join([]string{
 		nodeDumpStart,
@@ -179,6 +237,7 @@ func TestCaptureCacheDumpFromStreamReportsSchemaErrorWithValidNodes(t *testing.T
 		cacheNodeLine("node-a", "500.00"),
 		`Node (broken): allocatable<cpu invalid> idle <cpu 1000.00>, used <cpu 0.00>, releasing <cpu 0.00>`,
 		nodeDumpEnd,
+		cacheDumpEnd,
 	}, "\n") + "\n"
 
 	nodes, err := captureDumpAfterSignal(t, dump)
@@ -203,7 +262,7 @@ func TestCaptureCacheDumpFromStreamReturnsSignalError(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	nodes, err := captureCacheDumpFromStream(ctx, reader, func() error {
+	nodes, jobs, err := captureCacheDumpFromStream(ctx, reader, func() error {
 		return wantErr
 	})
 	if !errors.Is(err, wantErr) {
@@ -212,6 +271,10 @@ func TestCaptureCacheDumpFromStreamReturnsSignalError(t *testing.T) {
 
 	if nodes != nil {
 		t.Fatalf("nodes=%v, want nil", nodes)
+	}
+
+	if jobs != nil {
+		t.Fatalf("jobs=%v, want nil", jobs)
 	}
 }
 
@@ -224,7 +287,7 @@ func TestCaptureCacheDumpFromStreamReturnsPartialNodesOnCancellation(t *testing.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	nodes, err := captureCacheDumpFromStream(ctx, reader, func() error {
+	nodes, _, err := captureCacheDumpFromStream(ctx, reader, func() error {
 		go func() {
 			_, _ = io.WriteString(
 				writer,
@@ -363,13 +426,15 @@ func captureDumpAfterSignal(t *testing.T, dump string) (map[string]CacheNode, er
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	return captureCacheDumpFromStream(ctx, reader, func() error {
+	nodes, _, err := captureCacheDumpFromStream(ctx, reader, func() error {
 		if _, err := io.WriteString(writer, dump); err != nil {
 			return err
 		}
 
 		return writer.Close()
 	})
+
+	return nodes, err
 }
 
 func cacheNodeLine(name, idleCPU string) string {
@@ -379,6 +444,29 @@ func cacheNodeLine(name, idleCPU string) string {
 			"used <cpu 15500.00, memory 100.00>, releasing <cpu 0.00, memory 0.00>",
 		name,
 		idleCPU,
+	)
+}
+
+func cacheJobLine(uid, namespace, queue, name string, minAvailable int32) string {
+	return fmt.Sprintf(
+		"Job (%s): namespace %s (%s), name %s, minAvailable %d, podGroup <nil>, preemptable false, revocableZone , minAvailable , maxAvailable ",
+		uid,
+		namespace,
+		queue,
+		name,
+		minAvailable,
+	)
+}
+
+func cacheTaskLine(uid, namespace, name, job, status, resreq string) string {
+	return fmt.Sprintf(
+		"    0: Task (%s:%s/%s): job %s, status %s, pri 1, resreq %s, preemptable false, revocableZone ",
+		uid,
+		namespace,
+		name,
+		job,
+		status,
+		resreq,
 	)
 }
 

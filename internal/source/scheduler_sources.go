@@ -9,10 +9,12 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
 
 const (
+	schedulerActionsDirectory   = "pkg/scheduler/actions"
 	schedulerPluginsDirectory   = "pkg/scheduler/plugins"
 	maximumSchedulerSourceFiles = 4096
 	maximumSchedulerSourceFile  = 2 << 20
@@ -23,9 +25,7 @@ var schedulerFrameworkFiles = []string{
 	"cmd/scheduler/app/options/options.go",
 	"pkg/scheduler/actions/factory.go",
 	"pkg/scheduler/actions/allocate/allocate.go",
-	"pkg/scheduler/actions/allocate/v2/allocate.go",
 	"pkg/scheduler/actions/enqueue/enqueue.go",
-	"pkg/scheduler/actions/enqueue/v2/enqueue.go",
 	"pkg/scheduler/conf/scheduler_conf.go",
 	"pkg/scheduler/api/job_info.go",
 	"pkg/scheduler/cache/event_handlers.go",
@@ -35,28 +35,49 @@ var schedulerFrameworkFiles = []string{
 	"pkg/scheduler/plugins/factory.go",
 	"pkg/scheduler/plugins/util/util.go",
 	"pkg/scheduler/util/priority_queue.go",
-	"pkg/scheduler/util/queue_strategy.go",
 }
 
 var schedulerHookNames = []string{
+	"AddJobOrderFn",
+	"AddQueueOrderFn",
+	"AddTaskOrderFn",
+	"AddPreemptableFn",
+	"AddReclaimableFn",
+	"AddJobReadyFn",
+	"AddJobPipelinedFn",
 	"AddJobValidFn",
 	"AddJobEnqueueableFn",
+	"AddJobEnqueuedFn",
 	"AddPrePredicateFn",
 	"AddPredicateFn",
+	"AddBestNodeFn",
+	"AddNodeOrderFn",
+	"AddBatchNodeOrderFn",
+	"AddNodeMapFn",
+	"AddNodeReduceFn",
+	"AddOverusedFn",
+	"AddPreemptiveFn",
+	"AddAllocatableFn",
+	"AddTargetJobFn",
+	"AddReservedNodesFn",
+	"AddVictimTasksFns",
+	"AddJobStarvingFns",
 }
 
 // SourceFile describes a scheduler source file from the selected Volcano
 // worktree. Hooks is empty for the fixed action and framework files.
 type SourceFile struct {
-	Path    string
-	Hooks   []string
-	Content string
+	Path        string
+	Hooks       []string
+	PluginNames []string
+	Content     string
 }
 
 type schedulerSourceCandidate struct {
-	path    string
-	hooks   []string
-	content []byte
+	path        string
+	hooks       []string
+	pluginNames []string
+	content     []byte
 }
 
 // LoadSchedulerSources discovers the scheduler actions, framework dispatch,
@@ -95,6 +116,15 @@ func LoadSchedulerSources(
 		}
 	}
 
+	actions, err := discoverSchedulerActionSources(root)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, candidate := range actions {
+		candidates[candidate.path] = candidate
+	}
+
 	plugins, err := discoverPluginSources(root)
 	if err != nil {
 		return nil, err
@@ -120,15 +150,100 @@ func LoadSchedulerSources(
 		contentLimit := min(perFileLimit, remaining, len(candidate.content))
 
 		result = append(result, SourceFile{
-			Path:    candidate.path,
-			Hooks:   append([]string(nil), candidate.hooks...),
-			Content: string(candidate.content[:contentLimit]),
+			Path:        candidate.path,
+			Hooks:       append([]string(nil), candidate.hooks...),
+			PluginNames: append([]string(nil), candidate.pluginNames...),
+			Content:     string(candidate.content[:contentLimit]),
 		})
 
 		remaining -= contentLimit
 	}
 
 	return result, nil
+}
+
+func discoverSchedulerActionSources(root string) ([]schedulerSourceCandidate, error) {
+	actionsRoot := filepath.Join(root, filepath.FromSlash(schedulerActionsDirectory))
+	info, err := os.Lstat(actionsRoot)
+
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("inspect Volcano scheduler actions: %w", err)
+	}
+
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("Volcano scheduler actions directory must not be a symbolic link")
+	}
+
+	if !info.IsDir() {
+		return nil, fmt.Errorf("Volcano scheduler actions path is not a directory")
+	}
+
+	resolvedActionsRoot, err := filepath.EvalSymlinks(actionsRoot)
+	if err != nil {
+		return nil, fmt.Errorf("resolve Volcano scheduler actions path: %w", err)
+	}
+
+	if filepath.Clean(resolvedActionsRoot) != filepath.Clean(actionsRoot) {
+		return nil, fmt.Errorf("Volcano scheduler actions path contains a symbolic link")
+	}
+
+	candidates := make([]schedulerSourceCandidate, 0)
+	totalBytes := 0
+
+	err = filepath.WalkDir(actionsRoot, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+
+		if entry.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("scheduler action source path %s is a symbolic link", path)
+		}
+
+		if entry.IsDir() {
+			return nil
+		}
+
+		if filepath.Ext(entry.Name()) != ".go" || strings.HasSuffix(entry.Name(), "_test.go") {
+			return nil
+		}
+
+		if len(candidates) >= maximumSchedulerSourceFiles {
+			return fmt.Errorf("scheduler action source count exceeds %d", maximumSchedulerSourceFiles)
+		}
+
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return fmt.Errorf("resolve scheduler action source path: %w", err)
+		}
+
+		repositoryPath := filepath.ToSlash(relative)
+		candidate, found, err := loadSchedulerSource(root, repositoryPath)
+		if err != nil {
+			return err
+		}
+
+		if !found {
+			return nil
+		}
+
+		totalBytes += len(candidate.content)
+		if totalBytes > maximumSchedulerSourceScan {
+			return fmt.Errorf("scheduler action source exceeds %d total bytes", maximumSchedulerSourceScan)
+		}
+
+		candidates = append(candidates, candidate)
+
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("scan Volcano scheduler actions: %w", err)
+	}
+
+	return candidates, nil
 }
 
 func schedulerSourceRoot(worktree string) (string, error) {
@@ -193,6 +308,7 @@ func discoverPluginSources(root string) ([]schedulerSourceCandidate, error) {
 
 	allCandidates := make(map[string]schedulerSourceCandidate)
 	registeredUnits := make(map[string]struct{})
+	packagePluginNames := make(map[string]map[string]struct{})
 	totalBytes := 0
 
 	err = filepath.WalkDir(pluginsRoot, func(path string, entry os.DirEntry, walkErr error) error {
@@ -236,15 +352,28 @@ func discoverPluginSources(root string) ([]schedulerSourceCandidate, error) {
 			return fmt.Errorf("scheduler plugin source exceeds %d total bytes", maximumSchedulerSourceScan)
 		}
 
-		candidate.hooks, err = registeredSchedulerHooks(candidate.content, repositoryPath)
+		candidate.hooks, candidate.pluginNames, err = schedulerPluginMetadata(
+			candidate.content,
+			repositoryPath,
+		)
 		if err != nil {
 			return err
 		}
 
 		allCandidates[candidate.path] = candidate
+		unit := pluginPackage(candidate.path)
+		packagePath := pluginPackage(candidate.path)
+
+		if packagePluginNames[packagePath] == nil {
+			packagePluginNames[packagePath] = map[string]struct{}{}
+		}
+
+		for _, name := range candidate.pluginNames {
+			packagePluginNames[packagePath][name] = struct{}{}
+		}
 
 		if len(candidate.hooks) > 0 {
-			registeredUnits[pluginUnit(candidate.path)] = struct{}{}
+			registeredUnits[unit] = struct{}{}
 		}
 
 		return nil
@@ -256,20 +385,47 @@ func discoverPluginSources(root string) ([]schedulerSourceCandidate, error) {
 	candidates := make([]schedulerSourceCandidate, 0, len(allCandidates))
 
 	for _, candidate := range allCandidates {
-		if _, found := registeredUnits[pluginUnit(candidate.path)]; found {
-			candidates = append(candidates, candidate)
+		owner, found := nearestRegisteredPluginUnit(candidate.path, registeredUnits)
+		if !found {
+			continue
 		}
+
+		candidate.pluginNames = sortedStringSet(packagePluginNames[owner])
+		candidates = append(candidates, candidate)
 
 	}
 
 	return candidates, nil
 }
 
-func pluginUnit(repositoryPath string) string {
-	relative := strings.TrimPrefix(repositoryPath, schedulerPluginsDirectory+"/")
-	unit, _, _ := strings.Cut(relative, "/")
+func pluginPackage(repositoryPath string) string {
+	return filepath.ToSlash(filepath.Dir(filepath.FromSlash(repositoryPath)))
+}
 
-	return unit
+func nearestRegisteredPluginUnit(
+	repositoryPath string,
+	registeredUnits map[string]struct{},
+) (string, bool) {
+	unit := pluginPackage(repositoryPath)
+
+	for unit == schedulerPluginsDirectory || strings.HasPrefix(unit, schedulerPluginsDirectory+"/") {
+		if _, found := registeredUnits[unit]; found {
+			return unit, true
+		}
+
+		if unit == schedulerPluginsDirectory {
+			break
+		}
+
+		parent := filepath.ToSlash(filepath.Dir(filepath.FromSlash(unit)))
+		if parent == unit {
+			break
+		}
+
+		unit = parent
+	}
+
+	return "", false
 }
 
 func loadSchedulerSource(
@@ -355,13 +511,14 @@ func loadSchedulerSource(
 	}, true, nil
 }
 
-func registeredSchedulerHooks(content []byte, path string) ([]string, error) {
+func schedulerPluginMetadata(content []byte, path string) ([]string, []string, error) {
 	file, err := parser.ParseFile(token.NewFileSet(), path, content, parser.SkipObjectResolution)
 	if err != nil {
-		return nil, fmt.Errorf("parse scheduler plugin source %s: %w", path, err)
+		return nil, nil, fmt.Errorf("parse scheduler plugin source %s: %w", path, err)
 	}
 
 	registered := make(map[string]struct{})
+	pluginNames := make(map[string]struct{})
 
 	ast.Inspect(file, func(node ast.Node) bool {
 		call, ok := node.(*ast.CallExpr)
@@ -371,26 +528,84 @@ func registeredSchedulerHooks(content []byte, path string) ([]string, error) {
 
 		name := calledFunctionName(call.Fun)
 
-		for _, hook := range schedulerHookNames {
-			if name == hook {
-				registered[hook] = struct{}{}
+		if !schedulerHookRegistration(name) {
+			return true
+		}
 
-				break
+		registered[name] = struct{}{}
+
+		if len(call.Args) > 0 {
+			if literal, ok := call.Args[0].(*ast.BasicLit); ok && literal.Kind == token.STRING {
+				value, err := strconv.Unquote(literal.Value)
+				if err == nil && strings.TrimSpace(value) != "" {
+					pluginNames[value] = struct{}{}
+				}
 			}
 		}
 
 		return true
 	})
 
+	for _, declaration := range file.Decls {
+		general, ok := declaration.(*ast.GenDecl)
+		if !ok || (general.Tok != token.CONST && general.Tok != token.VAR) {
+			continue
+		}
+
+		for _, specification := range general.Specs {
+			valueSpec, ok := specification.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+
+			for index, name := range valueSpec.Names {
+				if name.Name != "PluginName" || index >= len(valueSpec.Values) {
+					continue
+				}
+
+				literal, ok := valueSpec.Values[index].(*ast.BasicLit)
+				if !ok || literal.Kind != token.STRING {
+					continue
+				}
+
+				value, err := strconv.Unquote(literal.Value)
+				if err == nil && strings.TrimSpace(value) != "" {
+					pluginNames[value] = struct{}{}
+				}
+			}
+		}
+	}
+
 	hooks := make([]string, 0, len(registered))
 
 	for _, hook := range schedulerHookNames {
 		if _, found := registered[hook]; found {
 			hooks = append(hooks, hook)
+			delete(registered, hook)
 		}
 	}
 
-	return hooks, nil
+	unknownHooks := sortedStringSet(registered)
+	hooks = append(hooks, unknownHooks...)
+
+	return hooks, sortedStringSet(pluginNames), nil
+}
+
+func schedulerHookRegistration(name string) bool {
+	return strings.HasPrefix(name, "Add") &&
+		(strings.HasSuffix(name, "Fn") || strings.HasSuffix(name, "Fns"))
+}
+
+func sortedStringSet(values map[string]struct{}) []string {
+	result := make([]string, 0, len(values))
+
+	for value := range values {
+		result = append(result, value)
+	}
+
+	sort.Strings(result)
+
+	return result
 }
 
 func calledFunctionName(function ast.Expr) string {

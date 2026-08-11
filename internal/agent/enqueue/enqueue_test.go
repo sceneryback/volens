@@ -11,13 +11,35 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func TestEvaluateFindsPodGroupRejection(t *testing.T) {
+func TestEvaluateFailsPendingPodGroupWhenEnqueueActionIsConfigured(t *testing.T) {
+	input := baseInput()
+	input.Actions = []string{"enqueue", "allocate"}
+	input.ActionsDeterminate = true
+
+	checks := Evaluate(input)
+
+	if len(checks) < 2 {
+		t.Fatalf("checks=%+v", checks)
+	}
+
+	if checks[1].ID != "job.enqueue.evidence" ||
+		!checks[1].Determinate || checks[1].Passed || checks[1].Skipped {
+		t.Fatalf("enqueue phase check=%+v", checks[1])
+	}
+
+	if !strings.Contains(checks[1].Reason, "phase=Pending") ||
+		!strings.Contains(checks[1].Reason, "Inqueue") {
+		t.Fatalf("reason=%q", checks[1].Reason)
+	}
+}
+
+func TestEvaluateKeepsPodGroupRejectionAsHistoricalEvidence(t *testing.T) {
 	input := baseInput()
 	input.GroupEvents = []corev1.Event{
 		{
 			Type:    corev1.EventTypeNormal,
 			Reason:  "Unschedulable",
-			Message: "queue quota is insufficient",
+			Message: "queue resource quota insufficient",
 			InvolvedObject: corev1.ObjectReference{
 				Kind: "PodGroup",
 			},
@@ -28,16 +50,17 @@ func TestEvaluateFindsPodGroupRejection(t *testing.T) {
 	}
 	checks := Evaluate(input)
 
-	if checks[1].Passed || !checks[1].Determinate {
+	if checks[1].Passed || checks[1].Determinate || checks[1].Skipped {
 		t.Fatalf("evidence check=%+v", checks[1])
 	}
 
-	if !strings.Contains(checks[1].Reason, "quota") {
+	if !strings.Contains(checks[1].Reason, "quota") ||
+		!strings.Contains(checks[1].Reason, "historical evidence") {
 		t.Fatalf("reason=%q", checks[1].Reason)
 	}
 }
 
-func TestEvaluateAcceptsExplicitEnqueueSuccess(t *testing.T) {
+func TestEvaluateKeepsExplicitEnqueueSuccessAsHistoricalEvidence(t *testing.T) {
 	input := baseInput()
 	input.PodEvents = []corev1.Event{
 		{
@@ -50,7 +73,7 @@ func TestEvaluateAcceptsExplicitEnqueueSuccess(t *testing.T) {
 	}
 	checks := Evaluate(input)
 
-	if !checks[1].Passed || !checks[1].Determinate {
+	if checks[1].Passed || checks[1].Determinate || checks[1].Skipped {
 		t.Fatalf("enqueue check=%+v", checks[1])
 	}
 
@@ -83,7 +106,7 @@ func TestEvaluateUsesNewestSchedulerEvidence(t *testing.T) {
 	}
 	checks := Evaluate(input)
 
-	if !checks[1].Passed || !strings.Contains(checks[1].Reason, "job enqueued") {
+	if checks[1].Determinate || !strings.Contains(checks[1].Reason, "job enqueued") {
 		t.Fatalf("enqueue check=%+v", checks[1])
 	}
 }
@@ -209,6 +232,82 @@ func TestEvaluateEventErrorsAreUnknown(t *testing.T) {
 
 	if checks[1].Determinate || !strings.Contains(checks[1].Reason, "PodGroup events") {
 		t.Fatalf("check=%+v", checks[1])
+	}
+}
+
+func TestEvaluateSkipsHistoricalEnqueueEvidenceWhenNoEnqueueActionIsConfigured(t *testing.T) {
+	input := baseInput()
+	input.ActionsDeterminate = true
+	input.ActiveDeterminate = true
+	input.Actions = []string{"allocate", "backfill"}
+	input.GroupEvents = []corev1.Event{
+		{
+			Reason:  "FailedEnqueue",
+			Message: "queue resource quota insufficient",
+			InvolvedObject: corev1.ObjectReference{
+				Kind: "PodGroup",
+			},
+			Source: corev1.EventSource{Component: "volcano"},
+		},
+	}
+
+	checks := Evaluate(input)
+
+	for _, index := range []int{1, 2} {
+		if !checks[index].Skipped || !checks[index].Passed || !checks[index].Determinate {
+			t.Fatalf("unreachable enqueue check[%d]=%+v", index, checks[index])
+		}
+	}
+}
+
+func TestEvaluateKeepsUnconfirmedNoEnqueuePolicyUnknown(t *testing.T) {
+	input := baseInput()
+	input.ActionsDeterminate = true
+	input.Actions = []string{"allocate", "backfill"}
+	input.GroupEvents = []corev1.Event{
+		{
+			Reason:  "FailedEnqueue",
+			Message: "historical queue rejection",
+			InvolvedObject: corev1.ObjectReference{
+				Kind: "PodGroup",
+			},
+			Source: corev1.EventSource{Component: "volcano"},
+		},
+	}
+
+	checks := Evaluate(input)
+
+	for _, index := range []int{1, 2} {
+		if checks[index].Determinate || checks[index].Skipped {
+			t.Fatalf("unconfirmed inactive enqueue check[%d]=%+v", index, checks[index])
+		}
+
+		if !strings.Contains(checks[index].Reason, "not proven active") {
+			t.Fatalf("check[%d] reason=%q", index, checks[index].Reason)
+		}
+	}
+}
+
+func TestEvaluatePrioritizesCurrentPendingPhaseOverHistoricalEnqueueEvents(t *testing.T) {
+	input := baseInput()
+	input.ActionsDeterminate = true
+	input.Actions = []string{"enqueue", "allocate"}
+	input.GroupEvents = []corev1.Event{
+		{
+			Reason:  "FailedEnqueue",
+			Message: "queue resource quota insufficient",
+			InvolvedObject: corev1.ObjectReference{
+				Kind: "PodGroup",
+			},
+			Source: corev1.EventSource{Component: "volcano"},
+		},
+	}
+
+	checks := Evaluate(input)
+
+	if checks[1].Skipped || checks[1].Passed || !checks[1].Determinate ||
+		!strings.Contains(checks[1].Reason, "phase=Pending") {
+		t.Fatalf("current enqueue phase check=%+v", checks[1])
 	}
 }
 

@@ -339,6 +339,27 @@ func TestGetVolcanoSchedulerUsesStandardLabelWithCustomPodName(t *testing.T) {
 	}
 }
 
+func TestParseSchedulerVersionOutput(t *testing.T) {
+	output := `2026/08/08 16:28:32 maxprocs: Leaving GOMAXPROCS=10: CPU quota undefined
+API Version: v1alpha1
+Version: v1.9.0
+Git SHA: 03a8cb50420c4e89ac3380f79d42a3ab05c4be97
+Built At: 2025-11-05 05:57:32
+Go Version: go1.24.2
+Go OS/Arch: linux/arm64`
+
+	scheduler, err := parseSchedulerVersionOutput(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if scheduler.Version != "v1.9.0" ||
+		scheduler.GitSHA != "03a8cb50420c4e89ac3380f79d42a3ab05c4be97" ||
+		scheduler.GoOSArch != "linux/arm64" {
+		t.Fatalf("scheduler version=%+v", scheduler)
+	}
+}
+
 func TestSchedulerPodIndexObservesImageUpdate(t *testing.T) {
 	pod := schedulerPod("volcano-scheduler-a", "volcanosh/vc-scheduler:v1")
 	kube := fake.NewSimpleClientset(pod)

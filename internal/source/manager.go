@@ -264,6 +264,53 @@ func branchPriority(branch string) int {
 	}
 }
 
+// RecommendBranch chooses the best branch name for a scheduler semantic
+// version. It prefers exact release branches, then the default branch.
+func RecommendBranch(version string, branches []string) string {
+	version = strings.TrimPrefix(strings.TrimSpace(version), "v")
+	if version == "" {
+		return firstDefaultBranch(branches)
+	}
+
+	parts := strings.Split(version, ".")
+	candidates := []string{
+		"release-" + version,
+		"v" + version,
+		version,
+	}
+
+	if len(parts) >= 2 {
+		majorMinor := parts[0] + "." + parts[1]
+		candidates = append(candidates, "release-"+majorMinor, "v"+majorMinor, majorMinor)
+	}
+
+	for _, candidate := range candidates {
+		for _, branch := range branches {
+			if branch == candidate {
+				return branch
+			}
+		}
+	}
+
+	return firstDefaultBranch(branches)
+}
+
+func firstDefaultBranch(branches []string) string {
+	for _, wanted := range []string{"master", "main"} {
+		for _, branch := range branches {
+			if branch == wanted {
+				return branch
+			}
+		}
+	}
+
+	if len(branches) > 0 {
+		return branches[0]
+	}
+
+	return ""
+}
+
 func branchWorktreeName(branch, commit string) string {
 	safe := unsafeWorktreeCharacter.ReplaceAllString(branch, "_")
 	if len(safe) > 80 {

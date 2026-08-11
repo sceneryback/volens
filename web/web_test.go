@@ -18,10 +18,12 @@ func TestIndex(t *testing.T) {
 	}
 
 	for _, expected := range []string{
-		"Volens Debug Agent",
+		"Volens",
 		`id="pod"`,
 		`id="branch"`,
-		"Volcano 分支",
+		"Volcano branch",
+		`id="language"`,
+		`class="logo"`,
 	} {
 		if !strings.Contains(rec.Body.String(), expected) {
 			t.Fatalf("index page does not contain %q", expected)
@@ -42,6 +44,14 @@ func TestAppRequestsBranchesAndSubmitsSelection(t *testing.T) {
 	for _, expected := range []string{
 		`fetch("/api/branches")`,
 		`JSON.stringify({ namespace, pod, branch })`,
+		`renderEnqueue(report.enqueue || {})`,
+		`renderJobValid(report.jobValid || {})`,
+		`renderAllocate(report.allocate || {})`,
+		`clearReport();`,
+		`startProgress();`,
+		`progressStages`,
+		`free / total`,
+		`statusMark("skipped")`,
 	} {
 		if !strings.Contains(rec.Body.String(), expected) {
 			t.Fatalf("app.js does not contain %q", expected)

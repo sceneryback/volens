@@ -7,6 +7,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	schedulingv1 "k8s.io/api/scheduling/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -21,7 +22,14 @@ func TestVolcanoInformerInitialSyncCachedReadsAndWatchUpdate(t *testing.T) {
 	podGroup := testPodGroup("default", "job-a")
 	queue := testQueue("training")
 	volcano := newFakeVolcanoClient(podGroup, queue)
-	manager := startTestClientWithDynamic(t, fake.NewSimpleClientset(), volcano)
+	manager := startTestClientWithDynamic(
+		t,
+		fake.NewSimpleClientset(&schedulingv1.PriorityClass{
+			ObjectMeta: metav1.ObjectMeta{Name: "high"},
+			Value:      100,
+		}),
+		volcano,
+	)
 
 	gotPodGroup, err := manager.GetPodGroup(context.Background(), "default", "job-a")
 	if err != nil {
@@ -30,6 +38,11 @@ func TestVolcanoInformerInitialSyncCachedReadsAndWatchUpdate(t *testing.T) {
 
 	if gotPodGroup.Queue != "training" || gotPodGroup.MinMember != 2 || gotPodGroup.Phase != "Pending" {
 		t.Fatalf("PodGroup=%+v", gotPodGroup)
+	}
+
+	if gotPodGroup.CreationTimestamp.IsZero() || gotPodGroup.PriorityClassName != "high" ||
+		gotPodGroup.Priority == nil || *gotPodGroup.Priority != 100 {
+		t.Fatalf("PodGroup metadata=%+v", gotPodGroup)
 	}
 
 	if gotPodGroup.MinTaskMember["worker"] != 2 {
@@ -161,6 +174,96 @@ func TestListPodsForPodGroupUsesInformerIndexAndReturnsCopies(t *testing.T) {
 	}
 }
 
+func TestListPodGroupsForQueueUsesInformerIndexSortsAndReturnsCopies(t *testing.T) {
+	jobB := testPodGroup("team-b", "job-b")
+	jobA := testPodGroup("team-a", "job-a")
+	otherQueue := testPodGroup("team-a", "job-other")
+
+	if err := unstructured.SetNestedField(otherQueue.Object, "other", "spec", "queue"); err != nil {
+		t.Fatal(err)
+	}
+
+	volcano := newFakeVolcanoClient(jobB, jobA, otherQueue, testQueue("training"))
+	manager := startTestClientWithDynamic(t, fake.NewSimpleClientset(), volcano)
+
+	actionsBefore := len(volcano.Actions())
+	podGroups, err := manager.ListPodGroupsForQueue(context.Background(), "training", "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(podGroups) != 2 || podGroups[0].Namespace != "team-a" ||
+		podGroups[0].Name != "job-a" || podGroups[1].Namespace != "team-b" ||
+		podGroups[1].Name != "job-b" {
+		t.Fatalf("PodGroups=%+v", podGroups)
+	}
+
+	if actionsAfter := len(volcano.Actions()); actionsAfter != actionsBefore {
+		t.Fatalf(
+			"cached Queue PodGroup read added API actions: before=%d after=%d actions=%v",
+			actionsBefore,
+			actionsAfter,
+			volcano.Actions(),
+		)
+	}
+
+	podGroups[0].MinTaskMember["worker"] = 99
+	podGroups[0].MinResources[corev1.ResourceCPU] = podGroups[1].MinResources[corev1.ResourceCPU]
+
+	second, err := manager.ListPodGroupsForQueue(context.Background(), "training", "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if second[0].MinTaskMember["worker"] != 2 || second[0].MinResources.Cpu().String() != "2" {
+		t.Fatalf("PodGroup informer cache was mutated: %+v", second[0])
+	}
+}
+
+func TestListPodGroupsForQueueMergesUnspecifiedRuntimeDefaultQueue(t *testing.T) {
+	explicit := testPodGroup("team-a", "explicit")
+	unspecified := testPodGroup("team-a", "unspecified")
+	other := testPodGroup("team-a", "other")
+
+	if err := unstructured.SetNestedField(unspecified.Object, "", "spec", "queue"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := unstructured.SetNestedField(other.Object, "other", "spec", "queue"); err != nil {
+		t.Fatal(err)
+	}
+
+	volcano := newFakeVolcanoClient(explicit, unspecified, other, testQueue("training"))
+	manager := startTestClientWithDynamic(t, fake.NewSimpleClientset(), volcano)
+
+	withRuntimeDefault, err := manager.ListPodGroupsForQueue(
+		context.Background(),
+		"training",
+		"training",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(withRuntimeDefault) != 2 || withRuntimeDefault[0].Name != "explicit" ||
+		withRuntimeDefault[1].Name != "unspecified" {
+		t.Fatalf("runtime default PodGroups=%+v", withRuntimeDefault)
+	}
+
+	withoutRuntimeDefault, err := manager.ListPodGroupsForQueue(
+		context.Background(),
+		"training",
+		"default",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(withoutRuntimeDefault) != 1 || withoutRuntimeDefault[0].Name != "explicit" {
+		t.Fatalf("non-default Queue included unspecified PodGroups: %+v", withoutRuntimeDefault)
+	}
+}
+
 func TestVolcanoResourceMethodsReportUnavailableWithoutDynamicClient(t *testing.T) {
 	manager := startTestClient(t, fake.NewSimpleClientset())
 
@@ -170,6 +273,10 @@ func TestVolcanoResourceMethodsReportUnavailableWithoutDynamicClient(t *testing.
 
 	if _, err := manager.GetQueue(context.Background(), "default"); !errors.Is(err, ErrVolcanoResourceCacheUnavailable) {
 		t.Fatalf("GetQueue error=%v", err)
+	}
+
+	if _, err := manager.ListPodGroupsForQueue(context.Background(), "default", "default"); !errors.Is(err, ErrVolcanoResourceCacheUnavailable) {
+		t.Fatalf("ListPodGroupsForQueue error=%v", err)
 	}
 }
 
@@ -234,14 +341,16 @@ func testPodGroup(namespace, name string) *unstructured.Unstructured {
 			"apiVersion": "scheduling.volcano.sh/v1beta1",
 			"kind":       "PodGroup",
 			"metadata": map[string]any{
-				"namespace":       namespace,
-				"name":            name,
-				"uid":             string(types.UID("podgroup-uid")),
-				"resourceVersion": "1",
+				"namespace":         namespace,
+				"name":              name,
+				"uid":               string(types.UID("podgroup-uid")),
+				"resourceVersion":   "1",
+				"creationTimestamp": "2026-08-02T10:00:00Z",
 			},
 			"spec": map[string]any{
-				"queue":     "training",
-				"minMember": int64(2),
+				"queue":             "training",
+				"priorityClassName": "high",
+				"minMember":         int64(2),
 				"minTaskMember": map[string]any{
 					"worker": int64(2),
 				},

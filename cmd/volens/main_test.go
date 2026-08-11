@@ -8,9 +8,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/volcano-sh/volens/internal/agent"
+	"github.com/volcano-sh/volens/internal/cluster"
 	"github.com/volcano-sh/volens/internal/source"
 )
 
@@ -19,7 +21,7 @@ func TestGinRouterServesHealthStaticAndBranches(t *testing.T) {
 
 	sourceManager := newTestSourceManager(t)
 	analysisAgent := agent.New(nil, sourceManager, agent.LLMConfig{})
-	router := newRouter(nil, sourceManager, analysisAgent)
+	router := newRouter(nil, sourceManager, analysisAgent, nil)
 
 	for _, test := range []struct {
 		path     string
@@ -31,7 +33,7 @@ func TestGinRouterServesHealthStaticAndBranches(t *testing.T) {
 		},
 		{
 			path:     "/",
-			contains: "Volens Debug Agent",
+			contains: "Volens · Volcano Debug Agent",
 		},
 		{
 			path:     "/api/branches",
@@ -97,7 +99,7 @@ func TestGinAPIErrorResponses(t *testing.T) {
 
 	sourceManager := source.NewManager(t.TempDir(), "unused")
 	analysisAgent := agent.New(nil, sourceManager, agent.LLMConfig{})
-	router := newRouter(nil, sourceManager, analysisAgent)
+	router := newRouter(nil, sourceManager, analysisAgent, nil)
 	oversizedBody := `{"namespace":"` +
 		strings.Repeat("x", int(maxAnalyzeBodyBytes)) +
 		`","pod":"p"}`
@@ -164,6 +166,41 @@ func TestGinAPIErrorResponses(t *testing.T) {
 		if !strings.Contains(recorder.Header().Get("Content-Type"), "application/json") {
 			t.Errorf("%s %s content-type=%q", test.method, test.path, recorder.Header().Get("Content-Type"))
 		}
+	}
+}
+
+func TestBranchesUsesCachedSchedulerVersion(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	sourceManager := newTestSourceManager(t)
+	analysisAgent := agent.New(nil, sourceManager, agent.LLMConfig{})
+	cache := &schedulerVersionCache{}
+	cache.store(cluster.Scheduler{Version: "v1.12.3"}, nil)
+	router := newRouter(nil, sourceManager, analysisAgent, cache)
+
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/branches", nil))
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	if !strings.Contains(recorder.Body.String(), `"recommendedBranch":"release-1.12"`) {
+		t.Fatalf("body=%s", recorder.Body.String())
+	}
+}
+
+func TestAnalyzeTimeoutFromEnv(t *testing.T) {
+	t.Setenv("VOLENS_ANALYZE_TIMEOUT", "45s")
+
+	if timeout := analyzeTimeoutFromEnv(); timeout != 45*time.Second {
+		t.Fatalf("timeout=%s", timeout)
+	}
+
+	t.Setenv("VOLENS_ANALYZE_TIMEOUT", "invalid")
+
+	if timeout := analyzeTimeoutFromEnv(); timeout != defaultAnalyzeTimeout {
+		t.Fatalf("fallback timeout=%s", timeout)
 	}
 }
 

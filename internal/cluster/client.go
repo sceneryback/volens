@@ -26,6 +26,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	corelisters "k8s.io/client-go/listers/core/v1"
+	schedulinglisters "k8s.io/client-go/listers/scheduling/v1"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
@@ -35,6 +36,8 @@ import (
 const (
 	podPhaseIndex               = "volens/pod-phase"
 	podGroupIndex               = "volens/pod-group"
+	podGroupQueueIndex          = "volens/pod-group-queue"
+	podGroupUnspecifiedQueue    = "__volens_unspecified_queue__"
 	schedulerPodIndex           = "volens/volcano-scheduler"
 	defaultVolcanoSchedulerName = "volcano"
 	defaultVolcanoQueue         = "default"
@@ -59,26 +62,36 @@ type Scheduler struct {
 	Name                     string   `json:"name"`
 	UID                      string   `json:"uid"`
 	Container                string   `json:"container"`
+	Binary                   string   `json:"binary,omitempty"`
 	Image                    string   `json:"image"`
 	Tag                      string   `json:"tag"`
+	Version                  string   `json:"version,omitempty"`
+	GitSHA                   string   `json:"gitSHA,omitempty"`
+	BuiltAt                  string   `json:"builtAt,omitempty"`
+	GoVersion                string   `json:"goVersion,omitempty"`
+	GoOSArch                 string   `json:"goOSArch,omitempty"`
 	SchedulerNames           []string `json:"schedulerNames,omitempty"`
 	DefaultQueue             string   `json:"defaultQueue,omitempty"`
 	ConfigurationDeterminate bool     `json:"configurationDeterminate"`
 	ConfigurationReason      string   `json:"configurationReason,omitempty"`
+	VersionReason            string   `json:"versionReason,omitempty"`
 }
 
 type Client struct {
 	kube       kubernetes.Interface
 	restConfig *rest.Config
 
-	coreFactory    informers.SharedInformerFactory
-	volcanoFactory dynamicinformer.DynamicSharedInformerFactory
-	podLister      corelisters.PodLister
-	podIndexer     cache.Indexer
-	nodeLister     corelisters.NodeLister
-	podGroupLister cache.GenericLister
-	queueLister    cache.GenericLister
-	synced         []cache.InformerSynced
+	coreFactory     informers.SharedInformerFactory
+	volcanoFactory  dynamicinformer.DynamicSharedInformerFactory
+	podLister       corelisters.PodLister
+	podIndexer      cache.Indexer
+	nodeLister      corelisters.NodeLister
+	configMapLister corelisters.ConfigMapLister
+	priorityLister  schedulinglisters.PriorityClassLister
+	podGroupLister  cache.GenericLister
+	podGroupIndexer cache.Indexer
+	queueLister     cache.GenericLister
+	synced          []cache.InformerSynced
 
 	startOnce sync.Once
 	startErr  error
@@ -156,6 +169,8 @@ func newClientWithDynamic(
 
 	podInformer := coreFactory.Core().V1().Pods()
 	nodeInformer := coreFactory.Core().V1().Nodes()
+	configMapInformer := coreFactory.Core().V1().ConfigMaps()
+	priorityInformer := coreFactory.Scheduling().V1().PriorityClasses()
 
 	if err := podInformer.Informer().AddIndexers(cache.Indexers{
 		podPhaseIndex: func(object any) ([]string, error) {
@@ -173,15 +188,19 @@ func newClientWithDynamic(
 	}
 
 	manager := &Client{
-		kube:        kube,
-		restConfig:  restConfig,
-		coreFactory: coreFactory,
-		podLister:   podInformer.Lister(),
-		podIndexer:  podInformer.Informer().GetIndexer(),
-		nodeLister:  nodeInformer.Lister(),
+		kube:            kube,
+		restConfig:      restConfig,
+		coreFactory:     coreFactory,
+		podLister:       podInformer.Lister(),
+		podIndexer:      podInformer.Informer().GetIndexer(),
+		nodeLister:      nodeInformer.Lister(),
+		configMapLister: configMapInformer.Lister(),
+		priorityLister:  priorityInformer.Lister(),
 		synced: []cache.InformerSynced{
 			podInformer.Informer().HasSynced,
 			nodeInformer.Informer().HasSynced,
+			configMapInformer.Informer().HasSynced,
+			priorityInformer.Informer().HasSynced,
 		},
 	}
 
@@ -190,8 +209,15 @@ func newClientWithDynamic(
 		podGroupInformer := volcanoFactory.ForResource(podGroupGVR)
 		queueInformer := volcanoFactory.ForResource(queueGVR)
 
+		if err := podGroupInformer.Informer().AddIndexers(cache.Indexers{
+			podGroupQueueIndex: podGroupQueueIndexKeys,
+		}); err != nil {
+			return nil, fmt.Errorf("add PodGroup informer index: %w", err)
+		}
+
 		manager.volcanoFactory = volcanoFactory
 		manager.podGroupLister = podGroupInformer.Lister()
+		manager.podGroupIndexer = podGroupInformer.Informer().GetIndexer()
 		manager.queueLister = queueInformer.Lister()
 		manager.synced = append(
 			manager.synced,
@@ -451,6 +477,7 @@ func (m *Client) GetVolcanoScheduler(ctx context.Context) (Scheduler, error) {
 		Name:                     chosen.Name,
 		UID:                      string(chosen.UID),
 		Container:                container.Name,
+		Binary:                   schedulerBinary(container),
 		Image:                    container.Image,
 		Tag:                      imageTag(container.Image),
 		SchedulerNames:           schedulerNames,
@@ -725,6 +752,23 @@ func schedulerContainer(pod *corev1.Pod) *corev1.Container {
 	return nil
 }
 
+func schedulerBinary(container *corev1.Container) string {
+	if container == nil {
+		return ""
+	}
+
+	tokens := append([]string(nil), container.Command...)
+	tokens = append(tokens, container.Args...)
+
+	for _, token := range tokens {
+		if exactSchedulerIdentity(filepath.Base(token)) {
+			return token
+		}
+	}
+
+	return "vc-scheduler"
+}
+
 type schedulerRuntimeOptions struct {
 	schedulerNames      []string
 	defaultQueue        string
@@ -984,6 +1028,128 @@ func boundedSchedulerLogTail(tailLines int64) int64 {
 	}
 
 	return tailLines
+}
+
+// GetVolcanoSchedulerVersion executes vc-scheduler --version in the selected
+// leader Pod and parses the structured build lines printed by the binary.
+func (m *Client) GetVolcanoSchedulerVersion(ctx context.Context) (Scheduler, error) {
+	scheduler, err := m.GetVolcanoScheduler(ctx)
+	if err != nil {
+		return Scheduler{}, err
+	}
+
+	return m.GetVolcanoSchedulerVersionFor(ctx, scheduler)
+}
+
+// GetVolcanoSchedulerVersionFor enriches an already discovered scheduler
+// identity with binary version metadata. Exec failures are returned separately
+// so callers can keep branch selection manual.
+func (m *Client) GetVolcanoSchedulerVersionFor(
+	ctx context.Context,
+	scheduler Scheduler,
+) (Scheduler, error) {
+	candidates := schedulerVersionCommands(scheduler.Binary)
+	var lastErr error
+
+	for _, command := range candidates {
+		output, err := m.execInPod(
+			ctx,
+			scheduler.Namespace,
+			scheduler.Name,
+			scheduler.Container,
+			[]string{command, "--version"},
+		)
+		if err != nil {
+			lastErr = fmt.Errorf("%s --version: %w: %s", command, err, strings.TrimSpace(output))
+
+			continue
+		}
+
+		version, parseErr := parseSchedulerVersionOutput(output)
+		if parseErr != nil {
+			lastErr = fmt.Errorf("%s --version: %w", command, parseErr)
+
+			continue
+		}
+
+		version.Namespace = scheduler.Namespace
+		version.Name = scheduler.Name
+		version.UID = scheduler.UID
+		version.Container = scheduler.Container
+		version.Binary = command
+		version.Image = scheduler.Image
+		version.Tag = scheduler.Tag
+		version.SchedulerNames = append([]string(nil), scheduler.SchedulerNames...)
+		version.DefaultQueue = scheduler.DefaultQueue
+		version.ConfigurationDeterminate = scheduler.ConfigurationDeterminate
+		version.ConfigurationReason = scheduler.ConfigurationReason
+
+		return version, nil
+	}
+
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no scheduler binary candidates were available")
+	}
+
+	scheduler.VersionReason = lastErr.Error()
+
+	return scheduler, lastErr
+}
+
+func schedulerVersionCommands(binary string) []string {
+	candidates := []string{}
+
+	if strings.TrimSpace(binary) != "" {
+		candidates = append(candidates, strings.TrimSpace(binary))
+	}
+
+	candidates = append(candidates, "vc-scheduler", "./vc-scheduler", "/vc-scheduler")
+
+	seen := map[string]bool{}
+	result := make([]string, 0, len(candidates))
+
+	for _, candidate := range candidates {
+		if candidate == "" || seen[candidate] {
+			continue
+		}
+
+		seen[candidate] = true
+		result = append(result, candidate)
+	}
+
+	return result
+}
+
+func parseSchedulerVersionOutput(output string) (Scheduler, error) {
+	var scheduler Scheduler
+
+	for _, line := range strings.Split(output, "\n") {
+		key, value, found := strings.Cut(strings.TrimSpace(line), ":")
+		if !found {
+			continue
+		}
+
+		value = strings.TrimSpace(value)
+
+		switch strings.TrimSpace(key) {
+		case "Version":
+			scheduler.Version = value
+		case "Git SHA":
+			scheduler.GitSHA = value
+		case "Built At":
+			scheduler.BuiltAt = value
+		case "Go Version":
+			scheduler.GoVersion = value
+		case "Go OS/Arch":
+			scheduler.GoOSArch = value
+		}
+	}
+
+	if scheduler.Version == "" {
+		return Scheduler{}, fmt.Errorf("scheduler version output did not contain a Version line")
+	}
+
+	return scheduler, nil
 }
 
 func (m *Client) streamPodLogs(ctx context.Context, scheduler Scheduler) (io.ReadCloser, error) {

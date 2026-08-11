@@ -78,6 +78,17 @@ func podRequests(pod *corev1.Pod) map[string]float64 {
 	return requests
 }
 
+func hasRestartableInitContainer(pod *corev1.Pod) bool {
+	for index := range pod.Spec.InitContainers {
+		restartPolicy := pod.Spec.InitContainers[index].RestartPolicy
+		if restartPolicy != nil && *restartPolicy == corev1.ContainerRestartPolicyAlways {
+			return true
+		}
+	}
+
+	return false
+}
+
 func resourceListValues(resources corev1.ResourceList) map[string]float64 {
 	result := make(map[string]float64, len(resources))
 

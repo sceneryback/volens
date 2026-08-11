@@ -11,7 +11,6 @@ import (
 
 var allocateSources = []string{
 	"pkg/scheduler/actions/allocate/allocate.go",
-	"pkg/scheduler/actions/allocate/v2/allocate.go",
 	"pkg/scheduler/framework/session_plugins.go:PrePredicateFn",
 	"pkg/scheduler/framework/session_plugins.go:PredicateFn",
 }
@@ -19,6 +18,7 @@ var allocateSources = []string{
 type Input struct {
 	Pod        *corev1.Pod
 	Nodes      []corev1.Node
+	NodesErr   error
 	Dump       cluster.CacheDump
 	CaptureErr error
 }
@@ -54,10 +54,10 @@ func Evaluate(input Input) Result {
 		return result.Nodes[i].Name < result.Nodes[j].Name
 	})
 
-	result.AllocationCheck = allocationCheck(result.Nodes)
+	result.AllocationCheck = allocationCheck(result.Nodes, input.NodesErr)
 	result.PluginCheck = model.Unknown(
 		"plugins.predicates",
-		"filter",
+		"allocate",
 		"Active PrePredicate and Predicate plugin hooks",
 		"enabled predicates and plugin-private Session state cannot be reproduced from Kubernetes objects and the node cache dump alone",
 		nil,
@@ -77,7 +77,7 @@ func cacheEvidence(
 	if captureErr != nil {
 		return model.Unknown(
 			"cache.capture",
-			"evidence",
+			"allocate",
 			"Volcano scheduler cache captured",
 			captureErr.Error(),
 			dump.Nodes,
@@ -88,7 +88,7 @@ func cacheEvidence(
 	if len(missing) > 0 {
 		return model.Unknown(
 			"cache.capture",
-			"evidence",
+			"allocate",
 			"Volcano scheduler cache captured",
 			fmt.Sprintf("cache dump is missing eligible Ready nodes: %v", missing),
 			matched,
@@ -98,7 +98,7 @@ func cacheEvidence(
 
 	check := model.Known(
 		"cache.capture",
-		"evidence",
+		"allocate",
 		"Volcano scheduler cache captured",
 		true,
 		fmt.Sprintf(
@@ -116,7 +116,18 @@ func cacheEvidence(
 	return check
 }
 
-func allocationCheck(nodes []model.NodeResult) model.Check {
+func allocationCheck(nodes []model.NodeResult, nodesErr error) model.Check {
+	if nodesErr != nil {
+		return model.Unknown(
+			"allocate.nodes",
+			"allocate",
+			"At least one node passes common filters",
+			"list Kubernetes nodes from informer cache: "+nodesErr.Error(),
+			nil,
+			allocateSources,
+		)
+	}
+
 	passed := 0
 	unknown := false
 
@@ -133,7 +144,7 @@ func allocationCheck(nodes []model.NodeResult) model.Check {
 	if passed == 0 && unknown {
 		return model.Unknown(
 			"allocate.nodes",
-			"filter",
+			"allocate",
 			"At least one node passes common filters",
 			reason+"; one or more nodes lack Volcano cache evidence",
 			nil,
@@ -143,7 +154,7 @@ func allocationCheck(nodes []model.NodeResult) model.Check {
 
 	return model.Known(
 		"allocate.nodes",
-		"filter",
+		"allocate",
 		"At least one node passes common filters",
 		passed > 0,
 		reason,

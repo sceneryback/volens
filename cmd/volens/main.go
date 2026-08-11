@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -21,7 +22,10 @@ import (
 	"github.com/volcano-sh/volens/web"
 )
 
-const maxAnalyzeBodyBytes int64 = 1 << 20
+const (
+	maxAnalyzeBodyBytes   int64 = 1 << 20
+	defaultAnalyzeTimeout       = 15 * time.Minute
+)
 
 func main() {
 	if err := run(); err != nil {
@@ -54,12 +58,13 @@ func run() error {
 	)
 
 	analysisAgent := agent.New(clusterManager, sourceManager, agent.LLMConfigFromEnv())
+	schedulerVersionCache := newSchedulerVersionCache(ctx, clusterManager)
 
 	gin.SetMode(env("GIN_MODE", gin.ReleaseMode))
 
 	server := &http.Server{
 		Addr:              env("VOLENS_ADDR", ":8080"),
-		Handler:           newRouter(clusterManager, sourceManager, analysisAgent),
+		Handler:           newRouter(clusterManager, sourceManager, analysisAgent, schedulerVersionCache),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
@@ -73,7 +78,9 @@ func newRouter(
 	clusterManager *cluster.Client,
 	sourceManager *source.Manager,
 	analysisAgent *agent.Agent,
+	schedulerVersionCache *schedulerVersionCache,
 ) *gin.Engine {
+	analyzeSlots := make(chan struct{}, 1)
 	router := gin.New()
 	router.HandleMethodNotAllowed = true
 	router.Use(
@@ -104,14 +111,47 @@ func newRouter(
 	})
 
 	api.GET("/branches", func(c *gin.Context) {
-		value, err := sourceManager.ListBranches(c.Request.Context())
+		branches, err := sourceManager.ListBranches(c.Request.Context())
 		if err != nil {
 			writeError(c, http.StatusInternalServerError, err)
 
 			return
 		}
 
-		c.JSON(http.StatusOK, gin.H{"branches": value})
+		response := gin.H{"branches": branches}
+
+		if schedulerVersionCache != nil {
+			scheduler, versionErr, ready := schedulerVersionCache.snapshot()
+			if ready && versionErr == nil {
+				recommendedBranch := source.RecommendBranch(scheduler.Version, branches)
+				response["schedulerVersion"] = scheduler
+				response["recommendedBranch"] = recommendedBranch
+				log.Printf(
+					"detected Volcano scheduler version scheduler=%s/%s container=%s version=%s gitSHA=%s recommendedBranch=%s",
+					scheduler.Namespace,
+					scheduler.Name,
+					scheduler.Container,
+					scheduler.Version,
+					scheduler.GitSHA,
+					recommendedBranch,
+				)
+			} else if ready {
+				recommendedBranch := source.RecommendBranch("", branches)
+				response["schedulerVersionError"] = versionErr.Error()
+				response["recommendedBranch"] = recommendedBranch
+				log.Printf(
+					"cached Volcano scheduler version detection failed err=%v recommendedBranch=%s",
+					versionErr,
+					recommendedBranch,
+				)
+			} else {
+				recommendedBranch := source.RecommendBranch("", branches)
+				response["schedulerVersionError"] = "scheduler version detection is still running"
+				response["recommendedBranch"] = recommendedBranch
+			}
+		}
+
+		c.JSON(http.StatusOK, response)
 	})
 
 	api.POST("/analyze", func(c *gin.Context) {
@@ -136,12 +176,55 @@ func newRouter(
 			return
 		}
 
-		report, err := analysisAgent.Analyze(c.Request.Context(), request)
+		started := time.Now()
+		log.Printf(
+			"received analyze request namespace=%s pod=%s branch=%s",
+			request.Namespace,
+			request.Pod,
+			request.Branch,
+		)
+
+		analysisCtx, cancel := context.WithTimeout(
+			c.Request.Context(),
+			analyzeTimeoutFromEnv(),
+		)
+		defer cancel()
+
+		select {
+		case analyzeSlots <- struct{}{}:
+			defer func() {
+				<-analyzeSlots
+			}()
+		default:
+			writeError(c, http.StatusTooManyRequests, fmt.Errorf("another analysis is already running"))
+
+			return
+		}
+
+		report, err := analysisAgent.Analyze(analysisCtx, request)
 		if err != nil {
+			log.Printf(
+				"analyze request failed namespace=%s pod=%s branch=%s duration=%s err=%v",
+				request.Namespace,
+				request.Pod,
+				request.Branch,
+				time.Since(started),
+				err,
+			)
 			writeError(c, http.StatusInternalServerError, err)
 
 			return
 		}
+
+		log.Printf(
+			"analyze request completed namespace=%s pod=%s branch=%s duration=%s passed=%t conclusion=%q",
+			request.Namespace,
+			request.Pod,
+			request.Branch,
+			time.Since(started),
+			report.Passed,
+			report.Conclusion,
+		)
 
 		c.JSON(http.StatusOK, report)
 	})
@@ -244,4 +327,73 @@ func env(key, fallback string) string {
 	}
 
 	return fallback
+}
+
+func analyzeTimeoutFromEnv() time.Duration {
+	value := strings.TrimSpace(os.Getenv("VOLENS_ANALYZE_TIMEOUT"))
+	if value == "" {
+		return defaultAnalyzeTimeout
+	}
+
+	timeout, err := time.ParseDuration(value)
+	if err != nil || timeout <= 0 {
+		return defaultAnalyzeTimeout
+	}
+
+	return timeout
+}
+
+type schedulerVersionCache struct {
+	mu        sync.RWMutex
+	ready     bool
+	scheduler cluster.Scheduler
+	err       error
+}
+
+func newSchedulerVersionCache(ctx context.Context, clusterManager *cluster.Client) *schedulerVersionCache {
+	cache := &schedulerVersionCache{}
+
+	if clusterManager == nil {
+		cache.store(cluster.Scheduler{}, fmt.Errorf("cluster manager is not configured"))
+
+		return cache
+	}
+
+	go func() {
+		scheduler, err := clusterManager.GetVolcanoSchedulerVersion(ctx)
+		cache.store(scheduler, err)
+
+		if err != nil {
+			log.Printf("startup Volcano scheduler version detection failed err=%v", err)
+
+			return
+		}
+
+		log.Printf(
+			"startup detected Volcano scheduler version scheduler=%s/%s container=%s version=%s gitSHA=%s",
+			scheduler.Namespace,
+			scheduler.Name,
+			scheduler.Container,
+			scheduler.Version,
+			scheduler.GitSHA,
+		)
+	}()
+
+	return cache
+}
+
+func (c *schedulerVersionCache) store(scheduler cluster.Scheduler, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.ready = true
+	c.scheduler = scheduler
+	c.err = err
+}
+
+func (c *schedulerVersionCache) snapshot() (cluster.Scheduler, error, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	return c.scheduler, c.err, c.ready
 }

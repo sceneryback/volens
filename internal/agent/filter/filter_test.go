@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/volcano-sh/volens/internal/agent/model"
 	"github.com/volcano-sh/volens/internal/cluster"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -21,7 +22,7 @@ func TestEvaluateNodeUsesVolcanoIdleInsteadOfNodeAllocatable(t *testing.T) {
 	}
 
 	result := evaluateNode(pod, &node, cacheNode, true)
-	resourceCheck := result.Checks[len(result.Checks)-1]
+	resourceCheck := findNodeCheck(t, result, "node.resources")
 
 	if resourceCheck.Passed {
 		t.Fatal("request incorrectly fit Volcano idle")
@@ -31,7 +32,7 @@ func TestEvaluateNodeUsesVolcanoIdleInsteadOfNodeAllocatable(t *testing.T) {
 		t.Fatal("cache-backed result must be determinate")
 	}
 
-	if !strings.Contains(resourceCheck.Reason, "request 1.000 > available 0.500") {
+	if !strings.Contains(resourceCheck.Reason, "request 1.000 > idle+releasing 0.500") {
 		t.Fatalf("reason=%q", resourceCheck.Reason)
 	}
 }
@@ -41,7 +42,7 @@ func TestEvaluateNodeMarksMissingCacheIndeterminate(t *testing.T) {
 	node := testReadyNode()
 
 	result := evaluateNode(pod, &node, cluster.CacheNode{}, false)
-	resourceCheck := result.Checks[len(result.Checks)-1]
+	resourceCheck := findNodeCheck(t, result, "node.resources")
 
 	if result.Determinate {
 		t.Fatal("node must be indeterminate without Volcano idle evidence")
@@ -112,8 +113,9 @@ func TestEvaluateIncludesCommonAndPluginResults(t *testing.T) {
 		},
 		Nodes: map[string]cluster.CacheNode{
 			"node-a": {
-				Name: "node-a",
-				Idle: map[string]float64{"cpu": 2, "pods": 10},
+				Name:        "node-a",
+				Idle:        map[string]float64{"cpu": 2, "pods": 10},
+				Allocatable: map[string]float64{"cpu": 16, "pods": 100},
 			},
 		},
 	}
@@ -124,7 +126,7 @@ func TestEvaluateIncludesCommonAndPluginResults(t *testing.T) {
 		Dump:  dump,
 	})
 
-	if !result.CacheCheck.Passed || !result.AllocationCheck.Passed {
+	if !result.CacheCheck.Passed || result.AllocationCheck.Determinate {
 		t.Fatalf("result=%+v", result)
 	}
 
@@ -142,6 +144,24 @@ func TestEvaluateCaptureFailureIsUnknown(t *testing.T) {
 
 	if result.CacheCheck.Determinate || !strings.Contains(result.CacheCheck.Reason, "capture failed") {
 		t.Fatalf("cache check=%+v", result.CacheCheck)
+	}
+}
+
+func TestEvaluateReportsNodeCollectionErrorAsUnknown(t *testing.T) {
+	result := Evaluate(Input{
+		Pod:      &corev1.Pod{},
+		NodesErr: errors.New("informer cache unavailable"),
+		Dump: cluster.CacheDump{
+			Nodes: map[string]cluster.CacheNode{},
+		},
+	})
+
+	if result.AllocationCheck.Determinate || result.AllocationCheck.Passed {
+		t.Fatalf("allocation check=%+v", result.AllocationCheck)
+	}
+
+	if !strings.Contains(result.AllocationCheck.Reason, "informer cache unavailable") {
+		t.Fatalf("allocation reason=%q", result.AllocationCheck.Reason)
 	}
 }
 
@@ -172,7 +192,8 @@ func testReadyNode() corev1.Node {
 		},
 		Status: corev1.NodeStatus{
 			Allocatable: corev1.ResourceList{
-				corev1.ResourceCPU: resource.MustParse("16"),
+				corev1.ResourceCPU:  resource.MustParse("16"),
+				corev1.ResourcePods: resource.MustParse("110"),
 			},
 			Conditions: []corev1.NodeCondition{
 				{
@@ -182,4 +203,18 @@ func testReadyNode() corev1.Node {
 			},
 		},
 	}
+}
+
+func findNodeCheck(t *testing.T, result model.NodeResult, id string) model.Check {
+	t.Helper()
+
+	for _, check := range result.Checks {
+		if check.ID == id {
+			return check
+		}
+	}
+
+	t.Fatalf("missing check %q in %+v", id, result.Checks)
+
+	return model.Check{}
 }

@@ -13,7 +13,6 @@ import (
 
 var enqueueSources = []string{
 	"pkg/scheduler/actions/enqueue/enqueue.go",
-	"pkg/scheduler/actions/enqueue/v2/enqueue.go",
 	"pkg/scheduler/framework/session_plugins.go:JobEnqueueable",
 }
 
@@ -21,21 +20,23 @@ var queueSources = []string{
 	"cmd/scheduler/app/options/options.go",
 	"pkg/scheduler/cache/event_handlers.go:setPodGroup",
 	"pkg/scheduler/actions/enqueue/enqueue.go",
-	"pkg/scheduler/actions/enqueue/v2/enqueue.go",
 }
 
 type Input struct {
-	SchedulerName  string
-	PodGroup       cluster.PodGroup
-	PodGroupErr    error
-	QueueName      string
-	QueueNameErr   error
-	Queue          cluster.Queue
-	QueueErr       error
-	PodEvents      []corev1.Event
-	PodEventsErr   error
-	GroupEvents    []corev1.Event
-	GroupEventsErr error
+	SchedulerName      string
+	Actions            []string
+	ActionsDeterminate bool
+	ActiveDeterminate  bool
+	PodGroup           cluster.PodGroup
+	PodGroupErr        error
+	QueueName          string
+	QueueNameErr       error
+	Queue              cluster.Queue
+	QueueErr           error
+	PodEvents          []corev1.Event
+	PodEventsErr       error
+	GroupEvents        []corev1.Event
+	GroupEventsErr     error
 }
 
 func ResolveQueueName(
@@ -69,9 +70,77 @@ func Evaluate(input Input) []model.Check {
 	events := append([]corev1.Event(nil), input.PodEvents...)
 	events = append(events, input.GroupEvents...)
 	checks := []model.Check{evaluateQueue(input)}
+	standaloneEnqueue := containsAction(input.Actions, "enqueue")
+
+	if input.ActionsDeterminate && !standaloneEnqueue && input.ActiveDeterminate {
+		reason := "the observed scheduler actions do not contain enqueue; PodGroup phase and old Events are not a currently reachable enqueue gate"
+		checks = append(checks,
+			model.Skipped(
+				"job.enqueue.evidence",
+				"enqueue",
+				"Enqueue evidence",
+				reason,
+				enqueueSources,
+			),
+			model.Skipped(
+				"plugins.job-enqueueable",
+				"enqueue",
+				"Active JobEnqueueable plugin hooks",
+				reason,
+				enqueueSources,
+			),
+		)
+
+		return checks
+	}
+
+	if input.ActionsDeterminate && !standaloneEnqueue {
+		reason := "the observed scheduler actions do not contain enqueue, but that ConfigMap version is not proven active in the scheduler's in-memory Session; PodGroup phase and Events cannot prove the current enqueue gate"
+		evidence := map[string]any{
+			"observedActions":   append([]string(nil), input.Actions...),
+			"activeDeterminate": input.ActiveDeterminate,
+		}
+		checks = append(checks,
+			model.Unknown(
+				"job.enqueue.evidence",
+				"enqueue",
+				"Enqueue evidence",
+				reason,
+				evidence,
+				enqueueSources,
+			),
+			model.Unknown(
+				"plugins.job-enqueueable",
+				"enqueue",
+				"Active JobEnqueueable plugin hooks",
+				reason,
+				evidence,
+				enqueueSources,
+			),
+		)
+
+		return checks
+	}
+
+	if input.ActionsDeterminate && standaloneEnqueue &&
+		input.PodGroupErr == nil && !podGroupInQueue(input.PodGroup) {
+		checks = append(checks,
+			model.Known(
+				"job.enqueue.evidence",
+				"enqueue",
+				"Enqueue evidence",
+				false,
+				"PodGroup phase="+input.PodGroup.Phase+"; Volcano allocate only schedules jobs after they enter Inqueue/Running",
+				enqueueSources,
+			),
+			evaluatePluginHooks(input, enqueueRejected),
+		)
+
+		return checks
+	}
 
 	if podGroupInQueue(input.PodGroup) && input.PodGroupErr == nil {
-		return append(checks,
+		checks = append(checks,
 			model.Known(
 				"job.enqueue.evidence",
 				"enqueue",
@@ -82,36 +151,28 @@ func Evaluate(input Input) []model.Check {
 			),
 			evaluatePluginHooks(input, enqueueSucceeded),
 		)
+
+		return checks
 	}
 
 	event, outcome := newestEnqueueEvidence(events, input.SchedulerName)
 
-	if outcome == enqueueRejected {
-		return append(checks,
-			model.Known(
+	if outcome == enqueueRejected || outcome == enqueueSucceeded {
+		reason := eventReason(event) +
+			"; this Event is historical evidence and is not tied to the current scheduler Session, PodGroup transition, or queue resource snapshot"
+		checks = append(checks,
+			model.Unknown(
 				"job.enqueue.evidence",
 				"enqueue",
 				"Enqueue evidence",
-				false,
-				eventReason(event),
+				reason,
+				event,
 				enqueueSources,
 			),
 			evaluatePluginHooks(input, outcome),
 		)
-	}
 
-	if outcome == enqueueSucceeded {
-		return append(checks,
-			model.Known(
-				"job.enqueue.evidence",
-				"enqueue",
-				"Enqueue evidence",
-				true,
-				eventReason(event),
-				enqueueSources,
-			),
-			evaluatePluginHooks(input, outcome),
-		)
+		return checks
 	}
 
 	reason := "no Pod or PodGroup event proves enqueue success or rejection"
@@ -120,7 +181,7 @@ func Evaluate(input Input) []model.Check {
 		reason = eventErrors(input.PodEventsErr, input.GroupEventsErr)
 	}
 
-	return append(checks,
+	checks = append(checks,
 		model.Unknown(
 			"job.enqueue.evidence",
 			"enqueue",
@@ -131,6 +192,18 @@ func Evaluate(input Input) []model.Check {
 		),
 		evaluatePluginHooks(input, outcome),
 	)
+
+	return checks
+}
+
+func containsAction(actions []string, wanted string) bool {
+	for _, action := range actions {
+		if strings.TrimSpace(action) == wanted {
+			return true
+		}
+	}
+
+	return false
 }
 
 func evaluateQueue(input Input) model.Check {
@@ -247,9 +320,8 @@ func classifyEnqueueEvent(event corev1.Event) enqueueOutcome {
 		return enqueueSucceeded
 	}
 
-	if reason == "unschedulable" &&
-		strings.EqualFold(event.InvolvedObject.Kind, "PodGroup") &&
-		strings.EqualFold(event.Type, corev1.EventTypeNormal) {
+	if strings.EqualFold(event.InvolvedObject.Kind, "PodGroup") &&
+		strings.Contains(message, "queue resource quota insufficient") {
 		return enqueueRejected
 	}
 

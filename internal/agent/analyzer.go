@@ -3,13 +3,14 @@ package agent
 import (
 	"context"
 	"fmt"
+	"log"
 
 	"github.com/volcano-sh/volens/internal/agent/enqueue"
-	"github.com/volcano-sh/volens/internal/agent/filter"
-	"github.com/volcano-sh/volens/internal/agent/validate"
+	"github.com/volcano-sh/volens/internal/agent/model"
 	"github.com/volcano-sh/volens/internal/cluster"
 	"github.com/volcano-sh/volens/internal/source"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 type Agent struct {
@@ -30,6 +31,9 @@ func New(
 	}
 }
 
+// Analyze runs the registered scheduler rules in Volcano's scheduling order
+// and then builds the user-facing report. Each rule owns one phase of evidence
+// collection and may stop later phases when Volcano would not reach them.
 func (a *Agent) Analyze(ctx context.Context, request Request) (Report, error) {
 	if request.Namespace == "" || request.Pod == "" {
 		return Report{}, fmt.Errorf("namespace and pod are required")
@@ -39,112 +43,240 @@ func (a *Agent) Analyze(ctx context.Context, request Request) (Report, error) {
 		return Report{}, fmt.Errorf("cluster manager is not configured")
 	}
 
-	pod, err := a.clusterManager.GetPod(ctx, request.Namespace, request.Pod)
-	if err != nil {
-		return Report{}, err
+	state := newRuleState(a, request)
+
+	for _, rule := range analysisRuleSnapshot() {
+		if err := rule.Evaluate(ctx, state); err != nil {
+			return Report{}, fmt.Errorf("evaluate rule %s: %w", rule.Name(), err)
+		}
+
+		if state.stopped {
+			break
+		}
 	}
 
-	scheduler, schedulerErr := a.clusterManager.GetVolcanoScheduler(ctx)
+	if state.finishWithoutSource {
+		finishReport(state.Report, *state.evidence)
 
-	report := Report{
-		Request:   request,
-		Scheduler: scheduler,
-	}
-	report.Checks = append(report.Checks, validate.Evaluate(pod, scheduler, schedulerErr)...)
-	finalizeReport(&report)
-
-	if firstKnownFailure(report) != "" {
-		return report, nil
+		return *state.Report, nil
 	}
 
-	podGroup := validate.PodGroupName(pod)
-	group, groupErr := a.clusterManager.GetPodGroup(ctx, request.Namespace, podGroup)
-	tasks, tasksErr := a.clusterManager.ListPodsForPodGroup(ctx, request.Namespace, podGroup)
-	report.Checks = append(
-		report.Checks,
-		validate.EvaluatePodGroup(podGroup, group, groupErr, tasks, tasksErr)...,
+	a.completeReport(ctx, state.Report, state.scheduler, *state.evidence)
+
+	return *state.Report, nil
+}
+
+func stoppedAtPreflight(check model.Check) presentationEvidence {
+	prefix := "preflight 无法完成"
+
+	if check.Determinate && !check.Passed && !check.Skipped {
+		prefix = "preflight 明确失败"
+	}
+
+	return presentationEvidence{
+		PreflightStopped: true,
+		StopReason:       prefix + "：" + check.Name + " — " + check.Reason,
+	}
+}
+
+func observedEnqueueAction(policy model.SchedulerPolicy) bool {
+	if !policy.Determinate || !policy.ActiveDeterminate {
+		return true
+	}
+
+	for _, action := range policy.Actions {
+		if action == "enqueue" {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (a *Agent) completeReport(
+	ctx context.Context,
+	report *Report,
+	scheduler cluster.Scheduler,
+	evidence presentationEvidence,
+) {
+	if scheduler.Name != "" || report.Request.Branch != "" {
+		a.applySourceFallback(ctx, report, scheduler, evidence)
+
+		return
+	}
+
+	finishReport(report, evidence)
+}
+
+func finishReport(report *Report, evidence presentationEvidence) {
+	finalizeReport(report)
+	buildPresentation(report, evidence)
+	synchronizePresentation(report)
+	finalizeReport(report)
+	report.Diagnosis = diagnoseReport(*report)
+	log.Printf(
+		"analysis conclusions namespace=%s pod=%s passed=%t enqueue=%s jobValid=%s allocate=%s rootCause=%q",
+		report.Request.Namespace,
+		report.Request.Pod,
+		report.Passed,
+		report.Enqueue.State.Outcome,
+		report.JobValid.State.Outcome,
+		report.Allocate.State.Outcome,
+		report.Diagnosis.RootCause,
 	)
-	finalizeReport(&report)
+}
 
-	if firstKnownFailure(report) != "" {
-		return report, nil
-	}
+func schedulerEvidenceIdentityCheck(
+	policy model.SchedulerPolicy,
+	evidence cluster.Scheduler,
+) model.Check {
+	sources := []string{"clusterManager.CaptureCacheDump"}
 
-	queueName, queueNameErr := enqueue.ResolveQueueName(group, scheduler, schedulerErr)
-
-	var queue cluster.Queue
-	var queueErr error
-
-	if groupErr != nil {
-		queueErr = groupErr
-	} else if queueNameErr == nil {
-		queue, queueErr = a.clusterManager.GetQueue(ctx, queueName)
-	}
-
-	podEvents, podEventsErr := a.clusterManager.ListPodEvents(ctx, request.Namespace, request.Pod)
-	var groupEventsErr error
-	var groupEvents []corev1.Event
-
-	if groupErr != nil {
-		groupEventsErr = groupErr
-	} else {
-		groupEvents, groupEventsErr = a.clusterManager.ListPodGroupEvents(
-			ctx,
-			request.Namespace,
-			podGroup,
-			group.UID,
+	if policy.SchedulerUID == "" || evidence.UID == "" {
+		return model.Unknown(
+			"scheduler.evidence.identity",
+			"allocate",
+			"Policy and cache dump use the same scheduler Pod",
+			fmt.Sprintf(
+				"policy scheduler=%s/%s uid=%q; cache scheduler=%s/%s uid=%q",
+				policy.SchedulerNamespace,
+				policy.SchedulerPod,
+				policy.SchedulerUID,
+				evidence.Namespace,
+				evidence.Name,
+				evidence.UID,
+			),
+			nil,
+			sources,
 		)
 	}
 
-	report.Checks = append(report.Checks, enqueue.Evaluate(enqueue.Input{
-		SchedulerName:  pod.Spec.SchedulerName,
-		PodGroup:       group,
-		PodGroupErr:    groupErr,
-		QueueName:      queueName,
-		QueueNameErr:   queueNameErr,
-		Queue:          queue,
-		QueueErr:       queueErr,
-		PodEvents:      podEvents,
-		PodEventsErr:   podEventsErr,
-		GroupEvents:    groupEvents,
-		GroupEventsErr: groupEventsErr,
-	})...)
-	finalizeReport(&report)
-
-	if firstKnownFailure(report) != "" {
-		return report, nil
+	same := policy.SchedulerUID == evidence.UID &&
+		policy.SchedulerNamespace == evidence.Namespace &&
+		policy.SchedulerPod == evidence.Name
+	if !same {
+		return model.Unknown(
+			"scheduler.evidence.identity",
+			"allocate",
+			"Policy and cache dump use the same scheduler Pod",
+			fmt.Sprintf(
+				"scheduler leadership changed during analysis: policy=%s/%s uid=%s cache=%s/%s uid=%s",
+				policy.SchedulerNamespace,
+				policy.SchedulerPod,
+				policy.SchedulerUID,
+				evidence.Namespace,
+				evidence.Name,
+				evidence.UID,
+			),
+			nil,
+			sources,
+		)
 	}
 
-	nodes, err := a.clusterManager.ListNodes(ctx)
-	if err != nil {
-		return Report{}, err
+	return model.Known(
+		"scheduler.evidence.identity",
+		"allocate",
+		"Policy and cache dump use the same scheduler Pod",
+		true,
+		fmt.Sprintf(
+			"scheduler=%s/%s uid=%s",
+			evidence.Namespace,
+			evidence.Name,
+			evidence.UID,
+		),
+		sources,
+	)
+}
+
+func targetPodLookupCheck(request Request, err error) model.Check {
+	name := request.Namespace + "/" + request.Pod
+
+	if apierrors.IsNotFound(err) {
+		return model.Known(
+			"task.exists",
+			"preflight",
+			"Target Pod exists",
+			false,
+			name+": "+err.Error(),
+			nil,
+		)
 	}
 
-	dump, cacheErr := a.clusterManager.CaptureCacheDump(ctx)
-	if dump.Scheduler.Name != "" {
-		scheduler = dump.Scheduler
-		report.Scheduler = scheduler
+	return model.Unknown(
+		"task.load",
+		"preflight",
+		"Target Pod loaded from informer cache",
+		name+": "+err.Error(),
+		nil,
+		nil,
+	)
+}
+
+func (a *Agent) collectPodGroup(
+	ctx context.Context,
+	namespace string,
+	podGroupName string,
+) (cluster.PodGroup, error, []corev1.Pod, error) {
+	if podGroupName == "" {
+		err := fmt.Errorf("PodGroup association is unavailable")
+
+		return cluster.PodGroup{}, err, nil, err
 	}
 
-	filterResult := filter.Evaluate(filter.Input{
-		Pod:        pod,
-		Nodes:      nodes,
-		Dump:       dump,
-		CaptureErr: cacheErr,
-	})
-	report.Checks = append(report.Checks, filterResult.CacheCheck)
-	report.Nodes = filterResult.Nodes
-	report.Checks = append(
-		report.Checks,
-		filterResult.AllocationCheck,
-		filterResult.PluginCheck,
+	group, groupErr := a.clusterManager.GetPodGroup(ctx, namespace, podGroupName)
+	tasks, tasksErr := a.clusterManager.ListPodsForPodGroup(ctx, namespace, podGroupName)
+
+	return group, groupErr, tasks, tasksErr
+}
+
+func (a *Agent) collectQueue(
+	ctx context.Context,
+	group cluster.PodGroup,
+	groupErr error,
+	scheduler cluster.Scheduler,
+	schedulerErr error,
+) (string, error, cluster.Queue, error) {
+	if groupErr != nil {
+		err := fmt.Errorf("resolve effective Queue: PodGroup is unavailable: %w", groupErr)
+
+		return "", err, cluster.Queue{}, err
+	}
+
+	queueName, queueNameErr := enqueue.ResolveQueueName(group, scheduler, schedulerErr)
+	if queueNameErr != nil {
+		return queueName, queueNameErr, cluster.Queue{}, queueNameErr
+	}
+
+	queue, queueErr := a.clusterManager.GetQueue(ctx, queueName)
+
+	return queueName, nil, queue, queueErr
+}
+
+func (a *Agent) collectEnqueueEvents(
+	ctx context.Context,
+	request Request,
+	podGroupName string,
+	group cluster.PodGroup,
+	groupErr error,
+) ([]corev1.Event, error, []corev1.Event, error) {
+	podEvents, podEventsErr := a.clusterManager.ListPodEvents(ctx, request.Namespace, request.Pod)
+
+	if groupErr != nil || podGroupName == "" {
+		if groupErr == nil {
+			groupErr = fmt.Errorf("PodGroup association is unavailable")
+		}
+
+		err := fmt.Errorf("collect PodGroup events: PodGroup is unavailable: %w", groupErr)
+
+		return podEvents, podEventsErr, nil, err
+	}
+
+	groupEvents, groupEventsErr := a.clusterManager.ListPodGroupEvents(
+		ctx,
+		request.Namespace,
+		podGroupName,
+		group.UID,
 	)
 
-	finalizeReport(&report)
-
-	if firstKnownFailure(report) == "" && (scheduler.Name != "" || request.Branch != "") {
-		a.applySourceFallback(ctx, &report, scheduler)
-	}
-
-	return report, nil
+	return podEvents, podEventsErr, groupEvents, groupEventsErr
 }
