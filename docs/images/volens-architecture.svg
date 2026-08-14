@@ -1,0 +1,233 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1020" viewBox="0 0 1800 1020" role="img" aria-labelledby="title description">
+  <title id="title">Volens extensible and multi-version architecture</title>
+  <description id="description">One Volens deployment diagnoses multiple Volcano releases by detecting the scheduler version, capturing runtime cache evidence, selecting an exact source worktree, and executing an extensible ordered rule pipeline.</description>
+
+  <defs>
+    <linearGradient id="page" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fafbfc"/>
+      <stop offset="1" stop-color="#edf2f4"/>
+    </linearGradient>
+    <linearGradient id="volens" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#20262b"/>
+      <stop offset="1" stop-color="#151a1e"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#17212b" flood-opacity="0.12"/>
+    </filter>
+    <marker id="arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L7 3.5L0 7Z" fill="#71808a"/>
+    </marker>
+    <marker id="arrowOrange" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L7 3.5L0 7Z" fill="#ff5b2f"/>
+    </marker>
+    <style>
+      text { font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif; }
+      .page-title { fill:#171c21; font-size:39px; font-weight:760; }
+      .page-sub { fill:#68747d; font-size:17px; }
+      .section { fill:#273038; font-size:15px; font-weight:760; letter-spacing:.7px; }
+      .volens-title { fill:#fff; font-size:27px; font-weight:760; }
+      .volens-sub { fill:#aeb7bd; font-size:14px; }
+      .dark-title { fill:#f5f7f8; font-size:16px; font-weight:720; }
+      .dark-sub { fill:#aeb7bd; font-size:12px; }
+      .card-title { fill:#20282e; font-size:18px; font-weight:730; }
+      .card-sub { fill:#68747d; font-size:13px; }
+      .orange { fill:#ed5733; font-size:12px; font-weight:740; }
+      .tiny { fill:#73808a; font-size:11px; font-weight:620; }
+      .connector { fill:none; stroke:#71808a; stroke-width:2; stroke-linecap:round; stroke-linejoin:round; marker-end:url(#arrow); }
+      .connector-orange { fill:none; stroke:#ff5b2f; stroke-width:2.2; stroke-linecap:round; stroke-linejoin:round; marker-end:url(#arrowOrange); }
+      .connector-dashed { fill:none; stroke:#82909a; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; stroke-dasharray:6 7; marker-end:url(#arrow); }
+    </style>
+  </defs>
+
+  <rect width="1800" height="1020" rx="25" fill="url(#page)"/>
+
+  <!-- The same Volcano-tile and magnifier logo used by the Web UI. -->
+  <g transform="translate(525 43) scale(1.24)">
+    <g fill="#ff5b2f">
+      <rect x="26" y="8" width="8" height="8" rx="2"/>
+      <rect x="20" y="16" width="8" height="8" rx="2"/><rect x="32" y="16" width="8" height="8" rx="2"/>
+      <rect x="14" y="24" width="8" height="8" rx="2"/><rect x="26" y="24" width="8" height="8" rx="2"/><rect x="38" y="24" width="8" height="8" rx="2"/>
+      <rect x="8" y="32" width="8" height="8" rx="2"/><rect x="20" y="32" width="8" height="8" rx="2"/><rect x="32" y="32" width="8" height="8" rx="2"/><rect x="44" y="32" width="8" height="8" rx="2"/>
+      <rect x="2" y="42" width="8" height="8" rx="2"/><rect x="14" y="42" width="8" height="8" rx="2"/><rect x="26" y="42" width="8" height="8" rx="2"/><rect x="38" y="42" width="8" height="8" rx="2"/><rect x="50" y="42" width="8" height="8" rx="2"/>
+    </g>
+    <circle cx="49" cy="49" r="8" fill="#202326" stroke="#f4f6f7" stroke-width="3"/>
+    <path d="M55 55L61 61" stroke="#202326" stroke-width="5" stroke-linecap="round"/>
+    <path d="M55 55L61 61" stroke="#f4f6f7" stroke-width="2.4" stroke-linecap="round"/>
+  </g>
+  <text class="page-title" x="615" y="78">Volens — Volcano Debug Agent</text>
+  <text class="page-sub" x="615" y="108">One diagnostic plane · Multiple Volcano releases · Extensible rule engine</text>
+
+  <text class="section" x="55" y="176">OPERATOR</text>
+  <text class="section" x="1380" y="176">RUNTIME EVIDENCE &amp; SOURCE</text>
+
+  <!-- Operator input. -->
+  <g filter="url(#shadow)">
+    <rect x="55" y="225" width="230" height="145" rx="18" fill="#fff" stroke="#d8dee3"/>
+    <circle cx="170" cy="263" r="20" fill="#e7f6f1"/>
+    <path d="M160 268c5-11 15-11 20 0M170 255v-6" fill="none" stroke="#2aaf86" stroke-width="3" stroke-linecap="round"/>
+    <text class="card-title" x="170" y="310" text-anchor="middle">Web UI / API</text>
+    <text class="card-sub" x="170" y="336" text-anchor="middle">Select Pending Pod</text>
+    <text class="card-sub" x="170" y="357" text-anchor="middle">Default or manual branch</text>
+  </g>
+
+  <!-- One independent Volens instance. -->
+  <g filter="url(#shadow)">
+    <rect x="340" y="155" width="980" height="850" rx="26" fill="url(#volens)"/>
+    <rect x="340" y="155" width="8" height="850" rx="4" fill="#ff5b2f"/>
+  </g>
+
+  <!-- Clean high-level connectors, rendered above the background and below cards. -->
+  <path class="connector-orange" d="M285 298H330"/>
+  <path class="connector" d="M1370 270H1269"/>
+  <path class="connector-orange" d="M1260 385H1370"/>
+  <path class="connector" d="M505 370V436"/>
+  <path class="connector" d="M955 420V436"/>
+  <path class="connector" d="M495 705V741"/>
+  <path class="connector" d="M605 815H631"/>
+  <path class="connector-dashed" d="M925 815H951"/>
+  <path class="connector" d="M782 875V916"/>
+  <path class="connector" d="M1092 875V905H900V916"/>
+  <path class="connector" d="M1380 800H1300V720H900V741"/>
+
+  <text class="volens-title" x="830" y="198" text-anchor="middle">ONE VOLENS</text>
+  <text class="volens-sub" x="830" y="222" text-anchor="middle">Non-intrusive diagnostic Pod / 独立、无侵入诊断平面</text>
+
+  <!-- Runtime adapters. -->
+  <g>
+    <rect x="385" y="232" width="240" height="138" rx="16" fill="#2c343b" stroke="#49545d"/>
+    <text class="dark-title" x="410" y="267">Gin Web API</text>
+    <text class="dark-sub" x="410" y="294">Analyze request + progress</text>
+    <text class="dark-sub" x="410" y="316">Pending Pod + branch selection</text>
+    <text class="dark-sub" x="410" y="338">English / 中文 UI</text>
+  </g>
+  <g>
+    <rect x="650" y="232" width="610" height="82" rx="16" fill="#2c343b" stroke="#49545d"/>
+    <text class="dark-title" x="675" y="262">Cluster Manager</text>
+    <text class="dark-sub" x="675" y="286">In-cluster client-go informers: Pods · PodGroups · Queues · Nodes</text>
+    <text class="dark-sub" x="675" y="306">ConfigMap · Events · no kubectl polling</text>
+  </g>
+  <g>
+    <rect x="650" y="330" width="610" height="90" rx="16" fill="#322d2a" stroke="#a0573d"/>
+    <text class="dark-title" x="675" y="360">vc-scheduler Adapter</text>
+    <text class="dark-sub" x="675" y="384">Startup: exec --version · Analysis: follow logs → SIGUSR2</text>
+    <text class="dark-sub" x="675" y="405">Parse version metadata and Nodes · Jobs · Tasks cache dump</text>
+  </g>
+
+  <!-- Extensible ordered rule pipeline. -->
+  <g>
+    <rect x="385" y="445" width="875" height="260" rx="20" fill="#1b2126" stroke="#47535c"/>
+    <text class="dark-title" x="410" y="480">Rule Registry — execution follows global registration order</text>
+    <rect x="1038" y="460" width="192" height="35" rx="17" fill="#253a34" stroke="#3e8b72"/>
+    <text x="1134" y="482" text-anchor="middle" fill="#68d7b0" font-size="12" font-weight="720">+ RegisterRule(rule)</text>
+    <text class="dark-sub" x="410" y="506">Built-ins mirror Volcano scheduling reachability; developers can append new Rule implementations.</text>
+
+    <rect x="410" y="540" width="150" height="120" rx="15" fill="#303941" stroke="#53606a"/>
+    <circle cx="435" cy="568" r="14" fill="#ff5b2f"/><text x="435" y="573" text-anchor="middle" fill="#fff" font-size="12" font-weight="750">1</text>
+    <text class="dark-title" x="460" y="573">Validate</text>
+    <text class="dark-sub" x="432" y="606">Pod / PG legality</text>
+    <text class="dark-sub" x="432" y="627">Scheduler config</text>
+
+    <rect x="575" y="540" width="150" height="120" rx="15" fill="#303941" stroke="#53606a"/>
+    <circle cx="600" cy="568" r="14" fill="#ff5b2f"/><text x="600" y="573" text-anchor="middle" fill="#fff" font-size="12" font-weight="750">2</text>
+    <text class="dark-title" x="625" y="573">Enqueue</text>
+    <text class="dark-sub" x="597" y="606">proportion / capacity</text>
+    <text class="dark-sub" x="597" y="627">Stop when rejected</text>
+
+    <rect x="740" y="540" width="150" height="120" rx="15" fill="#303941" stroke="#53606a"/>
+    <circle cx="765" cy="568" r="14" fill="#ff5b2f"/><text x="765" y="573" text-anchor="middle" fill="#fff" font-size="12" font-weight="750">3</text>
+    <text class="dark-title" x="790" y="573">JobValid</text>
+    <text class="dark-sub" x="762" y="606">Plugin validity hooks</text>
+    <text class="dark-sub" x="762" y="627">Preserve tier order</text>
+
+    <rect x="905" y="540" width="150" height="120" rx="15" fill="#303941" stroke="#53606a"/>
+    <circle cx="930" cy="568" r="14" fill="#ff5b2f"/><text x="930" y="573" text-anchor="middle" fill="#fff" font-size="12" font-weight="750">4</text>
+    <text class="dark-title" x="955" y="573">Allocate</text>
+    <text class="dark-sub" x="927" y="606">Resources + filters</text>
+    <text class="dark-sub" x="927" y="627">Evaluate nodes</text>
+
+    <rect x="1070" y="540" width="165" height="120" rx="15" fill="#242b31" stroke="#7c8992" stroke-dasharray="6 5"/>
+    <circle cx="1095" cy="568" r="14" fill="#3b474f"/><text x="1095" y="573" text-anchor="middle" fill="#fff" font-size="16" font-weight="700">+</text>
+    <text class="dark-title" x="1120" y="573">Custom Rule</text>
+    <text class="dark-sub" x="1092" y="606">Implement Evaluate</text>
+    <text class="dark-sub" x="1092" y="627">Register globally</text>
+
+    <text x="567" y="608" text-anchor="middle" fill="#ff5b2f" font-size="20" font-weight="760">→</text>
+    <text x="732" y="608" text-anchor="middle" fill="#ff5b2f" font-size="20" font-weight="760">→</text>
+    <text x="897" y="608" text-anchor="middle" fill="#ff5b2f" font-size="20" font-weight="760">→</text>
+    <text x="1062" y="608" text-anchor="middle" fill="#ff5b2f" font-size="20" font-weight="760">→</text>
+    <text class="tiny" x="410" y="685">A rule may stop later stages when Volcano would not reach them.</text>
+  </g>
+
+  <!-- Post-rule source alignment and bounded fallback. -->
+  <g>
+    <rect x="385" y="750" width="220" height="125" rx="16" fill="#233a34" stroke="#357a67"/>
+    <text class="dark-title" x="410" y="784">Rule-based report</text>
+    <text class="dark-sub" x="410" y="812">Known failures + dimensions</text>
+    <text x="410" y="846" fill="#59d4aa" font-size="20" font-weight="760">✓  ×  ?  —</text>
+  </g>
+  <g>
+    <rect x="640" y="750" width="285" height="125" rx="16" fill="#293139" stroke="#59646d"/>
+    <text class="orange" x="665" y="778">POST-RULE SOURCE ALIGNMENT</text>
+    <text class="dark-title" x="665" y="807">Version &amp; Source Manager</text>
+    <text class="dark-sub" x="665" y="833">Fetch exact ref → detached worktree</text>
+    <text class="dark-sub" x="665" y="854">Inspect matching plugin hooks</text>
+  </g>
+  <g>
+    <rect x="960" y="750" width="260" height="125" rx="16" fill="#3a3227" stroke="#8d6b39"/>
+    <text class="dark-title" x="985" y="790">Bounded LLM fallback</text>
+    <text class="dark-sub" x="985" y="819">Only when Rule results remain unknown</text>
+    <text class="dark-sub" x="985" y="842">Exact source · logs · scoped skills</text>
+  </g>
+  <g>
+    <rect x="640" y="925" width="330" height="58" rx="15" fill="#fff" stroke="#d8dee3"/>
+    <text x="805" y="960" text-anchor="middle" fill="#20272d" font-size="16" font-weight="730">Concise final diagnosis / 精炼结论</text>
+  </g>
+
+  <!-- Kubernetes API is an independent cluster evidence source. -->
+  <g filter="url(#shadow)">
+    <rect x="1380" y="210" width="350" height="110" rx="20" fill="#fff" stroke="#d8dee3"/>
+    <text class="card-title" x="1555" y="250" text-anchor="middle">Kubernetes API</text>
+    <text class="card-sub" x="1555" y="278" text-anchor="middle">Pods · PodGroups · Queues · Nodes</text>
+    <text class="card-sub" x="1555" y="300" text-anchor="middle">ConfigMap · Events · watch/list through client-go</text>
+  </g>
+
+  <!-- The active scheduler can be any supported Volcano release. -->
+  <g filter="url(#shadow)">
+    <rect x="1380" y="350" width="350" height="290" rx="22" fill="#fff" stroke="#ff5b2f" stroke-width="2.5"/>
+    <text class="card-title" x="1555" y="388" text-anchor="middle">Target Volcano cluster</text>
+    <text class="orange" x="1410" y="414">ONE ACTIVE RELEASE, DETECTED AT RUNTIME</text>
+
+    <rect x="1410" y="425" width="290" height="82" rx="12" fill="#fff7f3" stroke="#f0d8cf"/>
+    <text class="card-title" x="1555" y="454" text-anchor="middle">vc-scheduler leader Pod</text>
+    <text class="card-sub" x="1555" y="477" text-anchor="middle">--version · logs · SIGUSR2 · cache dump</text>
+    <text class="card-sub" x="1555" y="497" text-anchor="middle">No patch · no new scheduler hook</text>
+
+    <rect x="1410" y="526" width="62" height="32" rx="16" fill="#f1f4f5"/><text x="1441" y="547" text-anchor="middle" fill="#334048" font-size="12" font-weight="700">v1.9</text>
+    <rect x="1482" y="526" width="62" height="32" rx="16" fill="#f1f4f5"/><text x="1513" y="547" text-anchor="middle" fill="#334048" font-size="12" font-weight="700">v1.10</text>
+    <rect x="1554" y="526" width="62" height="32" rx="16" fill="#f1f4f5"/><text x="1585" y="547" text-anchor="middle" fill="#334048" font-size="12" font-weight="700">v1.11</text>
+    <rect x="1626" y="526" width="74" height="32" rx="16" fill="#ffe9e1"/><text x="1663" y="547" text-anchor="middle" fill="#d84b28" font-size="12" font-weight="700">v1.12+</text>
+    <text class="card-sub" x="1555" y="590" text-anchor="middle">One Volens image supports every listed release.</text>
+    <text class="card-sub" x="1555" y="614" text-anchor="middle">Detected version selects source; override is optional.</text>
+  </g>
+
+  <!-- Multi-version source catalog used to build immutable worktrees. -->
+  <g filter="url(#shadow)">
+    <rect x="1380" y="690" width="350" height="230" rx="20" fill="#fff" stroke="#d8dee3"/>
+    <text class="card-title" x="1555" y="730" text-anchor="middle">Volcano source catalog</text>
+    <text class="card-sub" x="1555" y="758" text-anchor="middle">Official or configured Git remote</text>
+    <rect x="1410" y="782" width="135" height="34" rx="10" fill="#f2f5f6"/><text x="1477" y="804" text-anchor="middle" fill="#334048" font-size="12" font-weight="700">release-1.9</text>
+    <rect x="1555" y="782" width="145" height="34" rx="10" fill="#f2f5f6"/><text x="1627" y="804" text-anchor="middle" fill="#334048" font-size="12" font-weight="700">release-1.10</text>
+    <rect x="1410" y="826" width="135" height="34" rx="10" fill="#f2f5f6"/><text x="1477" y="848" text-anchor="middle" fill="#334048" font-size="12" font-weight="700">release-1.11</text>
+    <rect x="1555" y="826" width="145" height="34" rx="10" fill="#f2f5f6"/><text x="1627" y="848" text-anchor="middle" fill="#334048" font-size="12" font-weight="700">release-1.12+</text>
+    <text class="card-sub" x="1555" y="890" text-anchor="middle">Each analysis uses a commit-specific detached worktree.</text>
+  </g>
+
+  <!-- Connector labels live outside cards. -->
+  <rect x="1272" y="257" width="108" height="25" rx="8" fill="#f5f7f8"/>
+  <text class="tiny" x="1326" y="274" text-anchor="middle">watch / list</text>
+  <rect x="1264" y="372" width="116" height="25" rx="8" fill="#f5f7f8"/>
+  <text class="tiny" x="1322" y="389" text-anchor="middle">exec / stream</text>
+  <rect x="1190" y="708" width="128" height="25" rx="8" fill="#f5f7f8"/>
+  <text class="tiny" x="1254" y="725" text-anchor="middle">fetch exact ref</text>
+
+</svg>
